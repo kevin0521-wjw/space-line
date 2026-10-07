@@ -1,0 +1,4653 @@
+<!DOCTYPE html>
+<!--
+================================================================================
+  星际防线（Space Line）· 单文件 HTML5 太空射击游戏
+================================================================================
+  【游戏说明】
+    玩家驾驶飞船驻守屏幕底部，敌方战机从顶部落下。
+    - 子弹命中敌人：敌人被击毁并获得分数，同时产生粒子爆炸；
+    - 敌人撞到玩家或在屏幕底部漏过：扣除 1 点生命；
+    - 生命归零则游戏结束。
+    - 击杀精英敌（橙色六边形，3 发才能击毁）分数更高；
+    - 难度随时间提升：敌人更快、生成更密、精英出现概率更高。
+
+  【核心玩法循环】
+    连击倍率  —— 连续击杀不断则倍率从 x1 爬到 x5（每 5 连升 1 级），
+                 一旦漏怪或受击立即清零。这把"苟着不打"和"稳定清屏"区分开，
+                 也让每次漏怪都有明确的代价。
+    道具掉落  —— 击毁敌机有概率掉落 7 种道具：
+                 护盾（挡一次伤害）/ 散射（三向弹）/ 急速（射速翻倍）/
+                 清屏炸弹（清空全场并伤及 BOSS）/ 增援（+1 命，上限 6）/
+                 双列（解锁平行双弹道）/ 激光（解锁持续穿透光束）。
+    三把武器  —— 单发 / 双列 / 激光，同位选择而非升级链条：
+                 单发最均衡；双列两条平行弹道，清横向排开的敌机最顺手；
+                 激光单体输出略高且能贯穿整列，但完全吃不到散射加成。
+                 解锁后随时切换（Q 循环 / 1 2 3 直选）。
+    冲刺      —— Shift 短距高速位移，期间无敌，用于脱险，有 1.1 秒冷却。
+    BOSS 战   —— 每 5 级出现一个 BOSS：高血量、横向机动、发射慢速瞄准弹。
+                 血量降到 66% / 33% 时进入二阶段、三阶段：
+                 横移更快、开火更密、弹幕从单发变扇形、三阶段追加环形弹幕，
+                 且每次切换都会清空场上敌弹，给玩家一个喘息的节拍。
+                 击破给高额分数并掉落 3 个道具。
+    排行榜    —— 本地保存前 5 名（分数 / 等级 / 存活时长），带名次高亮。
+    分数      —— 击毁得分 × 当前连击倍率；BOSS 击破另计。
+
+  【操作方式】
+    键盘：移动 ← → ↑ ↓ / W A S D · 射击 空格（按住可连发）·
+          冲刺 Shift · 换枪 Q（或 1 2 3 直选）·
+          暂停 P / Esc · 重开 R
+    鼠标：在画布上按住拖动即可移动（拖动即自动开火）。
+          用的是"相对拖动"而不是"飞船跟手"—— 后者手指会挡住飞船，
+          而且手指接触面积远大于碰撞半径，微操会彻底废掉。
+    触屏：手指在画布空白处拖动移动 + 自动开火；右下角按钮冲刺，
+          左下角按钮换枪。手机建议横屏（画布能大 30%）。
+
+  【运行方法】
+    直接用浏览器打开本文件即可（双击，或拖进 Chrome/Edge 窗口）。
+    无需服务器、无需联网、无任何第三方库 / 图片 / 音频依赖。
+    所有图形均由 Canvas 2D API 实时绘制，音效由 WebAudio 合成（见 SFX 模块，
+    若浏览器策略限制自动播放，静音不会影响游戏逻辑）。
+
+  【代码结构】
+    CFG        —— 全部可调参数集中区（速度、冷却、生成间隔、难度增长、
+                  连击/道具/BOSS/后处理特效……）
+    工具函数    —— clamp / rand / randDir / lerp / pick / weightedPick /
+                  aabbOverlap / circleOverlap 等
+    Input      —— 键盘状态对象（含防粘滞与一次性按键处理）
+    Player     —— 玩家飞船（移动、冲刺、护盾、射击、绘制）
+    Bullet     —— 玩家子弹（直线/散射、光矛拖尾、出界标记）
+    Enemy      —— 敌人（普通 / 精英、下落、漂移、受击）
+    Particle   —— 粒子（爆炸碎片、渐隐）
+    Shockwave  —— 冲击波圆环（爆炸的"能量释放"层）
+    FloatText  —— 飘字（得分 / 连击 / 道具提示）
+    PowerUp    —— 掉落道具（5 种类型，含磁吸拾取）
+    EnemyBullet—— 敌方子弹（BOSS 发射，瞄准玩家）
+    Boss       —— 阶段 Boss（横向机动 + 周期开火）
+    Star/Nebula/Meteor —— 背景层（视差星、星云、流星）
+    Game       —— 状态机 + 游戏循环 + 生成 / 碰撞 / 渲染 / HUD / 后处理
+    frame()    —— requestAnimationFrame 主循环，基于 deltaTime 更新
+================================================================================
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>星际防线 · 简易太空射击</title>
+<style>
+  /* ===== 主题变量：想换配色只改这里 ===== */
+  :root{
+    --bg-deep: #05070f;
+    --accent: #4fd1ff;        /* 主强调色（青蓝） */
+    --accent-2: #ff5d7a;      /* 危险色（红） */
+    --text: #e8f2ff;
+    --text-dim: #7fa7c9;
+    /* 画布之外必须留出的垂直空间（标题 + 脚注 + 内外边距）。
+       它直接决定画布能长多大，所以抽成变量，好在矮窗口里收紧。 */
+    --vpad: 150px;
+  }
+
+  *{ box-sizing: border-box; }
+
+  html, body{ height: 100%; }
+
+  body{
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 16px;
+    /* 深空底色 + 中心微亮，让画面外也有宇宙感 */
+    background:
+      radial-gradient(circle at 50% 18%, #101c38 0%, #05070f 62%),
+      var(--bg-deep);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    overflow: hidden; /* 游戏是固定尺寸缩放的，禁止页面滚动 */
+  }
+
+  .brand{
+    font-size: 13px;
+    letter-spacing: .42em;
+    font-weight: 600;
+    color: var(--text-dim);
+    margin: 0;
+    text-transform: uppercase;
+  }
+
+  /*
+    矮视口分支：桌面应用窗口、笔记本矮屏、以及被系统压缩过的窗口都会落到这里。
+    藏掉标题与脚注（窗口标题栏已经写着游戏名了）并把预留空间压到最小，
+    于是 800×600 的画布在 680px 高的窗口里也能完整放下 —— 不然画布会被
+    "为了给标题留位置"白白缩小到 756×567 这种非整数倍尺寸，画面会发虚。
+  */
+  @media (max-height: 820px){
+    :root{ --vpad: 40px; }
+    .brand, .footnote{ display: none; }
+    body{ gap: 0; padding: 12px; }
+  }
+
+  /*
+    触屏设备（手机/平板）：标题和脚注对拿手机的人毫无价值，
+    却占掉了唯一能让画布长大的那点空间（见上方 --vpad 的说明）。
+    实测手机横屏下这一条能把画布从 467×350 放大到 520×390 —— 值得。
+  */
+  @media (pointer: coarse){
+    :root{ --vpad: 28px; }
+    .brand, .footnote{ display: none; }
+    body{ gap: 0; padding: 8px; }
+    /* 允许画布吃掉被 body padding 让出来的那点宽度 */
+    #game-wrap{ width: min(96vw, 800px, calc((100vh - var(--vpad)) * 4 / 3)); }
+  }
+
+  /*
+    画布容器：固定 4:3 比例，随窗口自适应缩放。
+    width 里同时用 calc((100vh - var(--vpad)) * 4 / 3) 约束宽度，
+    这样窗口很矮时画布会跟着变窄，而不会把页面撑出滚动条。
+  */
+  #game-wrap{
+    position: relative;
+    width: min(94vw, 800px, calc((100vh - var(--vpad)) * 4 / 3));
+    aspect-ratio: 4 / 3;
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow:
+      0 0 0 1px #16233d,
+      0 18px 60px rgba(0,0,0,.7),
+      0 0 90px rgba(41,110,255,.13);
+  }
+
+  /* 逻辑分辨率由 canvas 的 width/height 属性决定（800x600），
+     CSS 只负责把画布拉伸到容器大小，所以不同屏幕下手感完全一致。 */
+  canvas{
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: #02030a;
+    /* 手机上必须显式关掉浏览器手势：否则"拖着飞船往下滑"会被识别成下拉刷新，
+       长按会被识别成文字选择/放大镜，游戏根本没法玩。 */
+    touch-action: none;
+  }
+
+  /* ===== 覆盖层：开始 / 暂停 / 结束三态共用一个容器 ===== */
+  #overlay{
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 24px;
+    text-align: center;
+    background: linear-gradient(180deg, rgba(3,6,16,.82), rgba(3,6,16,.94));
+    transition: opacity .18s ease;
+  }
+  #overlay.hidden{
+    opacity: 0;
+    pointer-events: none;   /* 隐藏时必须同时取消命中，否则会挡住画布上的点击 */
+  }
+
+  #ov-title{
+    font-size: clamp(22px, 4.4vw, 40px);
+    font-weight: 700;
+    letter-spacing: .18em;
+    margin: 0;
+    color: #ffffff;
+    text-shadow: 0 0 24px rgba(79,209,255,.75), 0 0 60px rgba(79,209,255,.35);
+  }
+  #ov-sub{
+    margin: 0;
+    font-size: clamp(12px, 1.6vw, 15px);
+    color: var(--text-dim);
+    line-height: 1.7;
+  }
+  #ov-stats{
+    min-height: 20px;
+    font-size: clamp(12px, 1.6vw, 15px);
+    color: #bcd7ee;
+    line-height: 1.8;
+  }
+  #ov-stats b{ color: var(--accent); font-size: 1.12em; }
+
+  .btn{
+    margin-top: 6px;
+    padding: 11px 30px;
+    font-family: inherit;
+    font-size: clamp(13px, 1.7vw, 15px);
+    font-weight: 600;
+    letter-spacing: .12em;
+    color: #04121f;
+    background: linear-gradient(180deg, #9beaff, var(--accent));
+    border: 0;
+    border-radius: 999px;
+    cursor: pointer;
+    box-shadow: 0 6px 24px rgba(79,209,255,.35);
+    transition: transform .12s ease, box-shadow .12s ease, filter .12s ease;
+  }
+  .btn:hover{ transform: translateY(-2px); box-shadow: 0 10px 30px rgba(79,209,255,.5); }
+  .btn:active{ transform: translateY(0) scale(.98); filter: brightness(.94); }
+  .btn:focus-visible{ outline: 2px solid #fff; outline-offset: 3px; }
+
+  #ov-hint{
+    font-size: clamp(10px, 1.4vw, 12px);
+    color: #55799a;
+    line-height: 1.9;
+    margin: 0;
+  }
+  kbd{
+    display: inline-block;
+    padding: 1px 6px;
+    margin: 0 1px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: .95em;
+    color: #a9d8f5;
+    background: rgba(79,209,255,.1);
+    border: 1px solid rgba(79,209,255,.28);
+    border-radius: 4px;
+  }
+
+  .footnote{
+    font-size: 11px;
+    color: #3d5b78;
+    margin: 0;
+  }
+
+  /* ===== 排行榜（开始 / 结束界面共用）===== */
+  #ov-board{
+    display: none;              /* 无记录时整块隐藏，避免出现一个空框 */
+    width: min(100%, 320px);
+    padding: 10px 14px;
+    text-align: left;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: clamp(11px, 1.5vw, 13px);
+    color: #9fc4e0;
+    background: rgba(79, 209, 255, .06);
+    border: 1px solid rgba(79, 209, 255, .18);
+    border-radius: 10px;
+  }
+  #ov-board.show{ display: block; }
+  #ov-board .bhead{
+    font-size: .92em;
+    letter-spacing: .22em;
+    color: #55799a;
+    margin-bottom: 6px;
+  }
+  #ov-board .brow{
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    line-height: 1.85;
+  }
+  #ov-board .brow .rk{ color: #55799a; width: 1.6em; }
+  #ov-board .brow .sc{ color: #8fe3ff; flex: 1; }
+  #ov-board .brow .meta{ color: #476b8a; font-size: .92em; }
+  /* 本局排名高亮：玩家一眼就能在榜上找到自己刚才那一次 */
+  #ov-board .brow.now .rk,
+  #ov-board .brow.now .sc{ color: #ffd479; }
+  #ov-board .brow.now .sc::after{ content: " ←"; }
+
+  /* ===== 触屏辅助按钮（只在触摸设备上出现）=====
+     为什么用 DOM 按钮而不是画在 canvas 里：
+     画布是 800×600 逻辑坐标再整体缩放的，画在里面的按钮到了手机屏上
+     会缩成 30 多物理像素，手指根本按不准。DOM 按钮的尺寸以物理像素为单位，
+     手指按得准；半透明背景又能让底下的飞船保持可见。 */
+  #touch-pad{
+    position: absolute;
+    inset: 0;
+    display: none;
+    pointer-events: none;   /* 容器本身不挡画布，只有按钮自己可点 */
+  }
+  #game-wrap.touch-mode #touch-pad{ display: block; }
+
+  .tbtn{
+    position: absolute;
+    bottom: 14px;
+    width: 62px;
+    height: 62px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 2px;
+    pointer-events: auto;
+    border: 1px solid rgba(180, 140, 255, .42);
+    border-radius: 50%;
+    background: rgba(10, 16, 34, .40);
+    color: #d9c6ff;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    line-height: 1.1;
+    touch-action: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    transition: background .12s ease, transform .12s ease, border-color .12s ease;
+  }
+  .tbtn small{ font-size: 9px; color: #8fa9c5; letter-spacing: 0; }
+  .tbtn:active{ transform: scale(.93); }
+  #touch-dash{ right: 14px; border-color: rgba(127, 232, 255, .5); color: #9fe9ff; }
+  #touch-dash:active{ background: rgba(127, 232, 255, .3); }
+  /* 冷却中：按钮变暗，玩家不必盯着屏幕角落的数字也知道现在按了没用 */
+  #touch-dash.cooling{ border-color: rgba(85, 121, 154, .45); color: #55799a; }
+  #touch-weapon{ left: 14px; }
+  #touch-weapon:active{ background: rgba(180, 140, 255, .3); }
+  /* 还没解锁第二把武器：按钮变暗表示"按了也没用" */
+  #touch-weapon.dim{ border-color: rgba(85, 121, 154, .4); color: #6b86a3; }
+
+  /* 覆盖层必须盖在触屏按钮之上，否则暂停/结束时按钮还能被按到 */
+  #overlay{ z-index: 10; }
+</style>
+</head>
+<body>
+
+  <h1 class="brand">Space Line</h1>
+
+  <div id="game-wrap">
+    <!-- 逻辑分辨率固定 800x600，所有游戏逻辑都基于这套坐标系 -->
+    <canvas id="game" width="800" height="600"></canvas>
+
+    <div id="overlay" class="hidden">
+      <h2 id="ov-title">星际防线</h2>
+      <p id="ov-sub"></p>
+      <div id="ov-stats"></div>
+      <div id="ov-board"></div>
+      <button id="ov-btn" class="btn" type="button">开始游戏</button>
+      <p id="ov-hint">
+        <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> 或 <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动 ·
+        <kbd>空格</kbd> 射击 ·
+        <kbd>Shift</kbd> 冲刺 ·
+        <kbd>Q</kbd> 换枪 ·
+        <kbd>P</kbd> 暂停 ·
+        <kbd>R</kbd> 重开
+      </p>
+    </div>
+
+    <!-- 触屏辅助按钮：只在触摸设备上显示（由键盘/触摸检测自动切换） -->
+    <div id="touch-pad">
+      <button id="touch-weapon" class="tbtn" type="button">
+        <span id="touch-weapon-text">单发</span><small>换枪 Q</small>
+      </button>
+      <button id="touch-dash" class="tbtn" type="button">
+        <span id="touch-dash-text">冲刺</span><small>Shift</small>
+      </button>
+    </div>
+  </div>
+
+  <p class="footnote">全部图形由 Canvas 实时绘制 · 无任何外部资源依赖</p>
+
+<script>
+'use strict';
+
+/* ============================================================================
+ * 0. 经典脚本（非 module）：所有声明都落在全局作用域，
+ *    这里用 IIFE 包一层，避免往 window 上泄漏变量。
+ * ========================================================================== */
+(function () {
+
+/* ============================================================================
+ * 1. 可调参数集中区（CFG）
+ *    —— 想调手感、难度、特效强度，只改这一块即可，不需要动逻辑代码。
+ * ========================================================================== */
+const CFG = {
+
+  /* ---------- 画布与时间 ---------- */
+  W: 800,                 // 逻辑宽度（像素，必须与 <canvas width> 一致）
+  H: 600,                 // 逻辑高度
+  // 单帧允许推进的最大时间（秒）。为什么必须夹紧：
+  // 切到别的标签页 / 拖动窗口后，requestAnimationFrame 的间隔可能变成好几秒，
+  // 不夹紧会让飞船和敌人一瞬间"瞬移"穿过碰撞检测（俗称隧道效应）。
+  // 1/30 秒 ≈ 保底 30FPS 的逻辑步长，既不会瞬移，也不会让游戏变得像慢动作。
+  MAX_DT: 1 / 30,
+
+  /* ---------- 屏幕反馈（震动）----------
+     ⚠️ 这几个键曾经只在 addShake()/render() 里被引用，却没有在这里定义。
+     后果不是报错，而是静默失效：Math.max(0, undefined) → NaN，
+     shakeTime 变成 NaN 之后 `if (shakeTime > 0)` 恒为假，
+     于是"屏幕震动"这个功能一次都没生效过，还完全不报错。
+     所以集中定义在这里，并且自检里专门断言震动值必须是有限数。 */
+  SHAKE_ON_KILL: 0.16,       // 击毁敌机的轻微震动时长（秒）
+  SHAKE_ON_KILL_MAG: 4,      // 对应幅度（像素），只做一点点"打击感"
+  SHAKE_ON_HIT: 0.45,        // 玩家受击的强震动时长（秒）
+  SHAKE_ON_HIT_MAG: 14,      // 对应幅度。数值明显大于击杀，玩家能立刻分辨"我挨打了"
+  SHAKE_ON_BOMB: 0.6,        // 炸弹引爆 / Boss 爆炸的震动
+  SHAKE_ON_BOMB_MAG: 20,
+
+  /* ---------- 玩家 ---------- */
+  PLAYER: {
+    SPEED: 340,           // 移动速度（像素/秒）
+    RADIUS: 16,           // 碰撞半径。比机身视觉略小 → 手感更宽容（"擦弹"不会死）
+    FIRE_COOLDOWN: 0.13,  // 射击冷却（秒）。按住空格按此频率连发 ≈ 7.7 发/秒
+    INVINCIBLE: 1.6,      // 被撞后的无敌时间（秒）。防止一次接触在连续多帧里被重复扣命
+    LIVES: 3,             // 初始生命数
+    MAX_LIVES: 6,         // 生命上限。加命道具不该无限叠，否则后期会变成无风险挂机
+    MARGIN: 22,           // 活动边距，避免飞船贴着画布边缘看不清
+    Y_MIN_RATIO: 0.4      // 纵向活动上限（占画布高度比例）：最多只能顶到 40% 高度处，
+                          // 否则玩家可以冲到最上方无风险清屏，游戏就没有压力了
+  },
+
+  /* ---------- 冲刺（Shift）----------
+     设计目的：给玩家一个"主动脱险"的手段，而不是只能被动挨打。
+     冲刺期间带无敌帧，所以它既是走位工具也是保命技；冷却用来限制滥用。
+     位移 = SPEED × TIME ≈ 900 × 0.16 = 144px，刚好够横穿一架精英敌的宽度。 */
+  DASH: {
+    SPEED: 900,          // 冲刺速度（像素/秒），约普通移动的 2.6 倍
+    TIME: 0.16,          // 冲刺持续时间（秒）
+    COOLDOWN: 1.1,       // 冷却（秒）。太长会失去"救急"的意义，太短则变成无脑位移
+    INVINCIBLE: 0.22     // 冲刺自带的无敌时长。略长于 TIME，留一点余量防止"刚冲刺完立刻被撞"
+  },
+
+  /* ---------- 触摸 / 鼠标控制 ----------
+     设计要点：**必须是"相对拖动"而不是"飞船跟手"**。
+     跟手（飞船直接跳到手指位置）有两个致命问题：
+       ① 手指必然挡住飞船 —— 手机射击游戏里最忌讳的就是看不见自己在哪；
+       ② 手指接触面积约 40~50px，而飞船碰撞半径只有 16px，
+          跟手等于让玩家用一支很粗的笔去描一条很细的线，微操全废。
+     相对拖动：按下时记住"手指位置"和"飞船位置"两条基准，
+     之后飞船的位移 = 手指的位移，于是手指可以放在飞船下方的空白区操作。 */
+  TOUCH: {
+    FOLLOW: 17,          // 跟随平滑系数（越大越跟手）。用 1-exp(-k·dt) 插值，
+                         // 这个写法帧率无关：144Hz 与 60Hz 下观感完全一致
+    DRAG_GAIN: 1.42,     // 拖动增益：手指移 1px，飞船移 1.42px。
+                         // 大于 1 是因为手机竖屏全屏横穿只有 ~360px 的可用宽度，
+                         // 而画布逻辑宽度是 800px —— 1:1 会让飞船永远够不到两侧
+    TAP_MS: 220          // 判定为"单击"而非拖动的时长阈值（毫秒）。
+                         // 用来避免抬手瞬间的微小抖动被当成一次有效拖动
+  },
+
+  /* ---------- 武器 ----------
+     三种武器对应三种局面，而不是"伤害数值递增"：
+       单发 PULSE —— 通用，弹道干净，适合精确点杀
+       双列 TWIN  —— 覆盖面宽，适合敌机横向分散时
+       激光 LASER —— 持续输出（伤害按 dt 结算），适合怼高血量的 BOSS
+     武器通过掉落解锁而不是开局全给，这样"捡到什么"本身就是一层随机性。 */
+  WEAPON: {
+    PULSE: { key: 'pulse', name: '单发', cd: 0.13, dmg: 1 },
+    TWIN:  { key: 'twin',  name: '双列', cd: 0.17, dmg: 1, offset: 11 },
+    // 激光：没有冷却，改成"每帧按 DPS×dt 结算"的持续伤害。
+    // dps 定在 16 是算过账的：单发 1/0.13s ≈ 7.7 dps，双列 2/0.17s ≈ 11.8 dps，
+    // 激光 16 只是略高，但它有独一份的"穿透整列"能力 —— 换来的代价是
+    // 完全不受散射加成、也无法左右覆盖。三者是同位选择而不是升级链条。
+    LASER: { key: 'laser', name: '激光', cd: 0,    dps: 16, width: 10 }
+  },
+  LASER_LEN: 640,        // 激光长度（从机头往上）。足够贯穿整屏，不必逐帧算终点
+
+  /* ---------- 本地排行榜 ----------
+     只留 5 条：榜单的作用是"给我一个具体的、够得着的目标"。
+     排到 20 条时玩家根本记不住第 17 名是多少分，目标感反而消失。 */
+  BOARD: {
+    KEEP: 5,             // 榜单保留条数
+    KEY_SCORES: 'space-line-scores',   // 榜单存档键
+    KEY_BEST: 'space-line-best'        // 旧版最高分存档键（读取时用于迁移）
+  },
+
+  /* ---------- 连击倍率 ----------
+     设计目的：把"稳定清屏"和"乱打"区分开。连续击杀不断则倍率爬升，
+     一旦漏怪或受击就清零 —— 于是玩家的最优解从"躲着不打"变成"必须主动接敌"，
+     同时漏怪的心理成本被放大，紧张感来自这里而不是单纯堆敌人数。 */
+  COMBO: {
+    STEP: 5,             // 每累计 5 次连续击杀提升 1 级倍率
+    MAX_LEVEL: 4,        // 倍率上限等级 → 最高 x5
+    WINDOW: 3.2          // 击杀后多久没有新击杀就断连（秒）。
+                         // 不能太短（正常走位会被误判断连），也不能太长（苟着也能保住倍率）
+  },
+
+  /* ---------- 道具掉落 ----------
+     五种道具各自解决一个具体困境，而不是"数值变大"的重复奖励：
+     护盾/冲刺管保命、散射管清屏效率、急速管输出节奏、炸弹管翻盘、加命管续航。 */
+  POWERUP: {
+    DROP_CHANCE: 0.14,       // 普通敌击毁后的掉落概率（精英另有加成）
+    ELITE_BONUS: 0.3,        // 精英敌额外掉落概率（精英难打，回报要明显）
+    SIZE: 15,                // 拾取判定半径（比视觉略大，手感更宽容）
+    FALL_SPEED: 62,          // 下落速度（像素/秒）。比敌人慢，给玩家反应时间去接
+    DRIFT: 26,               // 横向漂移，让道具下落轨迹不那么呆板
+    SHIELD_TIME: 5.5,        // 护盾持续（秒）
+    SPREAD_TIME: 9,          // 散射持续（秒）
+    RAPID_TIME: 7,           // 急速持续（秒）
+    MAGNET_RADIUS: 74        // 道具靠近到这个距离内会被吸向飞船，避免"差一点没接到"的挫败感
+  },
+
+  /* ---------- Boss ----------
+     每 5 级出现一次，给游戏一个明确的"关卡感"和阶段性目标，
+     否则无限刷小怪很容易在中段就失去驱动力。 */
+  BOSS: {
+    EVERY_LEVELS: 5,         // 每多少级触发一次 Boss（5 / 10 / 15…）
+    BASE_HP: 26,             // 1 号 Boss 血量
+    HP_PER_BOSS: 16,         // 每多一个 Boss 增加的血量（第 2 个、第 3 个更硬）
+    RADIUS: 46,              // 碰撞半径
+    ENTER_Y: 108,            // 入场后停留的纵坐标（画布顶部区域）
+    SWAY_SPEED: 0.75,        // 横向摆动角速度（rad/秒）
+    SWAY_RANGE: 210,         // 横向摆动幅度（像素）
+    FIRE_INTERVAL: 1.5,      // 开火间隔（秒）
+    BULLET_SPEED: 210,       // Boss 弹速度。刻意比玩家子弹慢很多，留出躲避空间
+    BULLET_RADIUS: 7,        // Boss 弹碰撞半径
+    SCORE: 500,              // 击破得分（会再乘连击倍率）
+    SCORE_PER_BOSS: 250,     // 后续 Boss 的额外分数
+
+    /* ---- 三阶段形态 ----
+       为什么要有阶段：一个血量很厚但行为全程不变的 BOSS，打起来只是"按住空格等它死"，
+       玩家没有任何需要重新学习的东西，BOSS 战的张力就来自"它变了，我得跟着变"。
+       阈值按剩余血量比例取，这样后续更硬的 BOSS 不需要另配一套数值。 */
+    PHASE_2_AT: 0.66,        // 血量降到 66% 进入二阶段
+    PHASE_3_AT: 0.33,        // 33% 进入三阶段（狂暴）
+    SWAY_SPEED_2: 1.25,      // 二阶段横移更快 → 更难预判落点
+    SWAY_SPEED_3: 1.75,
+    FIRE_INTERVAL_2: 1.05,   // 二阶段开火更密
+    FIRE_INTERVAL_3: 0.72,
+    SPREAD_2: 3,             // 二阶段一次射 3 发扇形
+    SPREAD_3: 5,             // 三阶段一次射 5 发
+    SPREAD_ANGLE: 0.20,      // 扇形相邻两发的夹角（弧度，约 11.5°）
+    RING_3: 14,              // 三阶段额外附带的环形弹幕发数（360° 均分）
+    RING_SPEED_3: 150        // 环形弹速度。比瞄准弹更慢 —— 它是"限制走位"而不是"直接打死你"
+  },
+
+  /* ---------- 后处理（画面质感）----------
+     全部是"加法层"，只影响观感，不参与任何逻辑判定。
+     统一在这里给开关，掉帧时可以一键关掉。 */
+  FX: {
+    GLOW: true,              // 辉光层：粒子/子弹/爆炸用 'lighter' 叠加，产生过曝光感
+    VIGNETTE: 0.55,          // 暗角强度 0~1。让视线自然聚焦到画面中央
+    SCANLINE: 0.05,          // 扫描线透明度 0 = 关闭。轻微 CRT 味，过量会显脏
+    HIT_VIGNETTE: 0.62       // 受击时额外叠一层红色暗角。比"整屏泛红"更高级：
+                             // 画面中央保持可读，只有边缘在报警，视线不会被糊住
+  },
+
+  /* ---------- 背景流星 ---------- */
+  METEOR: {
+    CHANCE_PER_SEC: 0.34,    // 每秒出现流星的期望次数
+    SPEED_MIN: 420,          // 速度下限
+    SPEED_MAX: 780,          // 速度上限
+    LIFE: 1.5                // 存活时长（秒）
+  },
+
+  /* ---------- 子弹 ---------- */
+  BULLET: {
+    SPEED: 640,           // 向上飞行速度（像素/秒）
+    W: 4,                 // 碰撞/绘制用宽度
+    H: 14,                // 碰撞/绘制用高度
+    DAMAGE: 1,            // 单发伤害；精英敌 3 点血，所以需要 3 发
+    TRAIL: 6,             // 光矛拖尾的采样段数（纯视觉，不参与碰撞）
+    SPREAD_ANGLE: 0.19    // 散射道具的三向夹角（弧度，约 11°）。
+                          // 刻意做小：太大就变成了"闭眼也能打中"，失去瞄准的意义
+  },
+
+  /* ---------- 敌人 ---------- */
+  ENEMY: {
+    BASE_SPEED: 95,              // 1 级时的下落速度（像素/秒）
+    SPEED_PER_LEVEL: 14,         // 每提升 1 级增加的下落速度
+    SPEED_JITTER: 0.18,          // 速度随机浮动比例（±18%），避免所有敌人整齐划一地落下
+    RADIUS: 17,                  // 普通敌的碰撞半径
+    ELITE_SCALE: 1.6,            // 精英敌半径倍率
+    HP_NORMAL: 1,                // 普通敌生命值
+    HP_ELITE: 3,                 // 精英敌生命值
+    DRIFT: 55,                   // 横向漂移最大速度（像素/秒）。设为 0 即全部为纯直线下落
+    DRIFT_CHANCE: 0.5,           // 有多大比例的敌人带横向漂移
+    BASE_INTERVAL: 1.05,         // 1 级时两次生成之间的基础间隔（秒）
+    MIN_INTERVAL: 0.32,          // 间隔下限。防止后期密到变成无法躲避的弹幕
+    INTERVAL_PER_LEVEL: 0.06,    // 每提升 1 级减少的生成间隔
+    INTERVAL_JITTER: 0.45,       // 实际间隔 = 基础间隔 × (1 ± 45%)。"随机间隔"就是靠它实现
+    ELITE_CHANCE: 0.06,          // 1 级时精英敌出现概率
+    ELITE_CHANCE_PER_LEVEL: 0.05,// 每提升 1 级增加的出现概率
+    ELITE_CHANCE_MAX: 0.42,      // 精英出现概率上限
+    SCORE_NORMAL: 10,            // 击毁普通敌得分
+    SCORE_ELITE: 30,             // 击毁精英敌得分
+    ROT_SPEED: 0.8               // 敌人自转角速度（rad/秒），纯视觉
+  },
+
+  /* ---------- 难度曲线 ---------- */
+  DIFFICULTY: {
+    SECONDS_PER_LEVEL: 16,  // 每存活 16 秒提升 1 级
+    MAX_LEVEL: 12           // 等级上限。不设上限的话后期数值会膨胀到无法游玩
+  },
+
+  /* ---------- 粒子特效 ---------- */
+  PARTICLE: {
+    EXPLOSION_COUNT: 16,    // 一次爆炸的基础粒子数
+    SPEED_MIN: 60,          // 粒子初速度下限（像素/秒）
+    SPEED_MAX: 320,         // 粒子初速度上限
+    LIFE_MIN: 0.25,         // 粒子寿命下限（秒）
+    LIFE_MAX: 0.65,         // 粒子寿命上限
+    DAMPING: 2.4,           // 速度衰减系数（越大停得越快），用于 exp(-k·dt) 运算
+    MAX: 700                // 粒子总数上限。超限时丢弃新粒子，优先级：流畅 > 华丽
+  },
+
+  /* ---------- 背景星空 ---------- */
+  STAR_COUNT: 170,          // 星星数量（3 层视差由每颗星的 z 值自动分配）
+  STAR_SPEED_ON_PLAY: 1.7,  // 游戏进行中星空滚动速度倍率（增加速度感）
+  STAR_SPEED_IDLE: 0.8,     // 菜单/结束界面的滚动倍率（保持画面不呆滞）
+  STAR_TWINKLE: 2.1,        // 星点闪烁速度（rad/秒）。慢一点才像星光，快了像故障灯
+  STAR_CROSS_MIN_Z: 0.72,   // z 大于此值的"近星"才画十字星芒。
+                            // 全部画星芒会糊成一片，只有少数几颗闪光才有层次
+  NEBULA_COUNT: 4           // 缓慢漂移的星云团数量（用径向渐变绘制，纯背景）
+};
+
+/* ============================================================================
+ * 2. 通用工具函数
+ * ========================================================================== */
+
+/**
+ * 把数值 v 夹紧到 [min, max] 区间。
+ * @param {number} v   待夹紧的数值
+ * @param {number} min 下限
+ * @param {number} max 上限
+ * @returns {number} 夹紧后的数值
+ * 用途：限制飞船不出界、控制数值不越界，比写 if 判断更不容易漏。
+ */
+function clamp(v, min, max) {
+  return v < min ? min : (v > max ? max : v);
+}
+
+/**
+ * 返回 [min, max) 区间内的随机浮点数。
+ * @param {number} min 下限（含）
+ * @param {number} max 上限（不含）
+ * @returns {number} 随机数
+ */
+function rand(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+/**
+ * 返回一个随机单位方向向量。
+ * @returns {{x:number, y:number}} 模长为 1 的二维向量
+ * 用途：粒子爆炸时朝四面八方飞散，比随机取 (x, y) 再归一化更均匀。
+ */
+function randDir() {
+  const a = Math.random() * Math.PI * 2;
+  return { x: Math.cos(a), y: Math.sin(a) };
+}
+
+/** 圆周率的两倍。画整圆/做周期性运算时到处都要用，提出来避免重复写 Math.PI * 2。 */
+const TAU = Math.PI * 2;
+
+/**
+ * 线性插值。
+ * @param {number} a 起点值
+ * @param {number} b 终点值
+ * @param {number} t 插值比例（0 → a，1 → b）
+ * @returns {number} 插值结果
+ * 用途：所有"平滑跟随"的手感都靠它 —— 机翼倾角、光圈呼吸、道具吸附速度。
+ *      直接赋值会很僵硬，插值一下就有了惯性。
+ */
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+/**
+ * 从数组里随机取一个元素。
+ * @param {Array} arr 候选数组
+ * @returns {*} 随机元素
+ * 用途：道具类型抽取。刻意不用 switch + 一堆 if，靠一张权重表驱动，
+ *      以后想加新道具只要往表里加一行。
+ */
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length) % arr.length];
+}
+
+/**
+ * 按权重表抽取一个键。
+ * @param {Object} table 形如 { A: 3, B: 1 } 的权重表（值越大越容易被抽到）
+ * @returns {string} 被抽中的键
+ * 为什么不用等概率抽：加命和清屏炸弹这种"救命牌"如果和散射一样常见，
+ * 游戏的紧张感会被稀释；靠权重把稀有度压下来，抽到才有惊喜。
+ */
+function weightedPick(table) {
+  const keys = Object.keys(table);
+  let total = 0;
+  for (let i = 0; i < keys.length; i++) total += table[keys[i]];
+  let r = Math.random() * total;
+  for (let i = 0; i < keys.length; i++) {
+    r -= table[keys[i]];
+    if (r <= 0) return keys[i];
+  }
+  return keys[keys.length - 1];   // 浮点误差兜底
+}
+
+/**
+ * 轴对齐矩形相交检测（AABB）。
+ * @param {{x:number,y:number,w:number,h:number}} a 矩形 A（x/y 为左上角）
+ * @param {{x:number,y:number,w:number,h:number}} b 矩形 B
+ * @returns {boolean} 是否相交
+ * 用途：子弹 × 敌人。两者都近似方正的形状，AABB 只需 4 次比较，
+ *      是每帧要跑几百次的热点，比圆形检测更省。
+ */
+function aabbOverlap(a, b) {
+  return a.x < b.x + b.w &&
+         a.x + a.w > b.x &&
+         a.y < b.y + b.h &&
+         a.y + a.h > b.y;
+}
+
+/**
+ * 圆形相交检测。
+ * @param {{x:number,y:number,r:number}} a 圆 A（圆心 + 半径）
+ * @param {{x:number,y:number,r:number}} b 圆 B
+ * @returns {boolean} 是否相交
+ * 用途：玩家 × 敌人。两者外形都是圆的，用圆形轮廓判定比包围盒更符合直觉。
+ * 实现细节：先比较"距离平方"和"半径和平方"，省掉一次 Math.sqrt——
+ *          开方是逐帧碰撞检测里最贵的运算之一，能省则省。
+ */
+function circleOverlap(a, b) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  const rr = a.r + b.r;
+  return dx * dx + dy * dy <= rr * rr;
+}
+
+/* ============================================================================
+ * 3. 输入模块 Input
+ *    —— 只负责"记录输入状态"，把键盘与指针翻译成语义化查询
+ *       （left/right/shoot/dragTarget），游戏逻辑不需要知道玩家按的是 A 还是点的是屏幕。
+ * ========================================================================== */
+const Input = {
+  // 普通对象存键状态，用 Object.create(null) 避免 'constructor' 之类的原型键名冲突
+  keys: Object.create(null),
+
+  /* ---- 指针（鼠标 / 触摸 / 触控笔）状态 ----
+     统一走 pointer 事件而不是分别处理 mouse + touch：
+       · 一套代码覆盖三种设备；
+       · 浏览器已经替我们处理好了多点触控、手掌误触、指针捕获等脏活；
+       · touch 事件还需要手写 passive:false 才能 preventDefault，pointer 没这层麻烦。 */
+  pointer: {
+    active: false,        // 是否正在按住
+    id: null,             // 正在"认领"的 pointerId（多指时只认第一根，避免基准被顶掉）
+    x: 0, y: 0,           // 当前指针位置（画布逻辑坐标）
+    sx: 0, sy: 0,         // 按下时的指针位置（拖动基准）
+    shipX: 0, shipY: 0,   // 按下时的飞船位置（拖动基准）
+    targetX: 0,           // 飞船要去的目标 x
+    targetY: 0,
+    dx: 0, dy: 0,         // 本帧的拖动方向（-1~1），用于机身倾斜与冲刺方向
+    downAt: 0,            // 按下时间戳（毫秒），用于单击/拖动判定
+    dashRequest: false,   // 一次性：请求冲刺（由屏幕按钮或双击置位）
+    isTouch: false        // 是否来自触摸（触摸下会自动开火，且不显示键盘提示）
+  },
+
+  /** 一次性动作回调（开始/暂停/重开），由 Game 注入。 */
+  oneShot: null,
+  /** 画布元素，用来把屏幕坐标换算成逻辑坐标。 */
+  canvas: null,
+
+  /**
+   * 绑定全局输入事件。
+   * @param {function(string):void} oneShotHandler 一次性按键处理器
+   * @param {HTMLCanvasElement} canvas 游戏画布
+   * @returns {void}
+   */
+  init(oneShotHandler, canvas) {
+    this.oneShot = oneShotHandler;
+    // 兜底：万一调用方忘了传画布，就自己找一次。
+    // 没了这一步，initPointer() 会静默早退 —— 键盘照常、指针全哑，且不报错，
+    // 是那种"测不出来但用户一眼就能发现"的 bug。
+    this.canvas = canvas ||
+      (typeof document !== 'undefined' ? document.getElementById('game') : null);
+
+    window.addEventListener('keydown', (e) => {
+      // 统一转小写：开着 CapsLock 或按住 Shift 时，事件里是 'A' 而不是 'a'，
+      // 不归一化就会出现"大写字母按了没反应"的诡异 bug。
+      const k = e.key.toLowerCase();
+
+      // 空格会滚动页面、方向键会滚动页面，必须拦掉默认行为，
+      // 否则在页面模式下按空格会把整个游戏滚出视野。
+      if (k === ' ' || k.indexOf('arrow') === 0) e.preventDefault();
+
+      this.keys[k] = true;
+
+      // e.repeat 表示这是浏览器长按产生的"自动重复"事件。
+      // 开始 / 暂停 / 重开这类一次性动作必须排除它，否则按住空格会疯狂重开。
+      if (!e.repeat) this.oneShot(k);
+    });
+
+    window.addEventListener('keyup', (e) => {
+      this.keys[e.key.toLowerCase()] = false;
+    });
+
+    // 关键防粘滞处理：Alt+Tab 切走时 keyup 会丢在别的窗口，
+    // 回到游戏后那个键会一直"按着"，飞船就会自己飘。
+    // 监听失焦直接清空全部状态即可根治。
+    window.addEventListener('blur', () => { this.clear(); });
+
+    this.initPointer();
+  },
+
+  /**
+   * 绑定画布上的指针事件（鼠标 / 触摸 / 触控笔）。
+   * @returns {void}
+   */
+  initPointer() {
+    const c = this.canvas;
+    if (!c) return;
+
+    // 把屏幕坐标换算成画布逻辑坐标。
+    // 必须按 getBoundingClientRect 的实际显示尺寸做比例缩放 ——
+    // 画布内部是 800×600，但 CSS 会把它拉伸到容器大小，
+    // 直接用 clientX 会让触摸位置整体偏移（屏幕越小偏得越离谱）。
+    const toLogical = (ev) => {
+      const r = c.getBoundingClientRect();
+      return {
+        x: (ev.clientX - r.left) / r.width * CFG.W,
+        y: (ev.clientY - r.top) / r.height * CFG.H
+      };
+    };
+
+    const down = (ev) => {
+      const p = toLogical(ev);
+      const P = this.pointer;
+
+      // ---- 多指保护：只认"第一根落在画布上的手指" ----
+      // 手机上右手会去点屏幕上的冲刺/换枪按钮，那根手指同样会产生 pointer 事件。
+      // 如果不区分 pointerId，第二根手指一按下就会把拖动基准（shipX/shipY）
+      // 重置到当前位置，飞船会"咯噔"一下跳走 —— 两手同操时手感直接崩掉。
+      if (P.active && ev.pointerId !== P.id) return;
+
+      P.id = ev.pointerId;
+      P.isTouch = (ev.pointerType === 'touch');
+      P.active = true;
+      P.x = P.sx = p.x;
+      P.y = P.sy = p.y;
+      // 拖动基准：按下瞬间的飞船位置。之后飞船位移 = 指针位移，
+      // 所以手指可以放在飞船下方的空白处，不会挡住飞船（详见 CFG.TOUCH 的注释）
+      P.shipX = Game.player.x;
+      P.shipY = Game.player.y;
+      P.targetX = P.shipX;
+      P.targetY = P.shipY;
+      P.dx = 0; P.dy = 0;
+      P.downAt = performance.now();
+      // 指针捕获：手指滑出画布后仍然收得到 move/up，
+      // 否则"拖到边缘再松手"会丢掉 up 事件，飞船卡在最后的位置
+      try { c.setPointerCapture(ev.pointerId); } catch (e) { /* 某些环境不支持，忽略 */ }
+      ev.preventDefault();
+    };
+
+    const move = (ev) => {
+      const P = this.pointer;
+      if (!P.active) return;
+      // 只响应"认领"的那根手指，其余（比如按屏幕按钮的那根）全部忽略
+      if (ev.pointerId !== P.id) return;
+      const p = toLogical(ev);
+      P.x = p.x; P.y = p.y;
+
+      // ---- 相对拖动 ----
+      const g = CFG.TOUCH.DRAG_GAIN;
+      const m = CFG.PLAYER.MARGIN;
+      P.targetX = clamp(P.shipX + (P.x - P.sx) * g, CFG.PLAYER.RADIUS + m, CFG.W - CFG.PLAYER.RADIUS - m);
+      P.targetY = clamp(P.shipY + (P.y - P.sy) * g,
+                        CFG.H * CFG.PLAYER.Y_MIN_RATIO, CFG.H - CFG.PLAYER.RADIUS - m);
+
+      // 本帧拖动方向（归一化到 -1~1）：驱动机身倾斜与"无方向按键时朝哪冲"
+      const span = 60;   // 移动多少像素算"满偏"
+      P.dx = clamp((P.x - P.sx) / span, -1, 1);
+      P.dy = clamp((P.y - P.sy) / span, -1, 1);
+      ev.preventDefault();
+    };
+
+    const up = (ev) => {
+      const P = this.pointer;
+      // 只处理认领的那根手指；否则"按按钮的手指抬起"会把拖动状态一并清掉，
+      // 玩家的移动手指还按着，飞船却停住了。
+      if (ev.pointerId !== P.id) return;
+      // 单击（按住时间短）视为"点一下"，不产生位移 —— 这样误触不会让飞船乱飘
+      if (performance.now() - P.downAt < CFG.TOUCH.TAP_MS && P.isTouch) {
+        P.targetX = Game.player.x;
+        P.targetY = Game.player.y;
+      }
+      P.active = false;
+      P.id = null;
+      P.dx = 0; P.dy = 0;
+      try { c.releasePointerCapture(ev.pointerId); } catch (e) { /* 忽略 */ }
+    };
+
+    c.addEventListener('pointerdown', down, { passive: false });
+    c.addEventListener('pointermove', move, { passive: false });
+    c.addEventListener('pointerup', up);
+    c.addEventListener('pointercancel', up);
+
+    // 屏蔽右键菜单与长按选择：拖动时弹出菜单会直接打断操作
+    c.addEventListener('contextmenu', (e) => e.preventDefault());
+  },
+
+  /** 清空全部输入状态。状态切换（开始/重开/暂停恢复）时调用，避免残留输入干扰新一局。 */
+  clear() {
+    this.keys = Object.create(null);
+    const P = this.pointer;
+    P.active = false;
+    P.id = null;
+    P.dx = 0; P.dy = 0;
+    P.dashRequest = false;
+  },
+
+  /* ---- 语义化查询：逻辑层只读这些 getter ---- */
+  get left()  { return !!(this.keys['arrowleft']  || this.keys['a']); },
+  get right() { return !!(this.keys['arrowright'] || this.keys['d']); },
+  get up()    { return !!(this.keys['arrowup']    || this.keys['w']); },
+  get down()  { return !!(this.keys['arrowdown']  || this.keys['s']); },
+
+  /**
+   * 是否正在开火。
+   * @returns {boolean}
+   * 触摸/鼠标下自动开火：手机上没有"按住空格"这种操作，
+   * 要求玩家同时按住屏幕再腾手指去按射击键是不现实的，
+   * 所以触摸期间默认持续开火（这也是所有手机射击游戏的做法）。
+   */
+  get shoot() { return !!this.keys[' '] || this.pointer.active; },
+
+  /**
+   * 取走一次"冲刺请求"（读后即清）。
+   * @returns {boolean} 本次是否请求了冲刺
+   * 为什么要"读后即清"：冲刺是一次性动作，如果用普通布尔标记，
+   * 按住屏幕按钮会每帧都触发一次冲刺，冷却形同虚设。
+   */
+  consumeDash() {
+    if (!this.pointer.dashRequest) return false;
+    this.pointer.dashRequest = false;
+    return true;
+  },
+
+  /** 请求一次冲刺（供屏幕按钮调用）。参数：无。返回：无。 */
+  requestDash() { this.pointer.dashRequest = true; }
+};
+
+/* ============================================================================
+ * 4. 实体类
+ * ========================================================================== */
+
+/**
+ * 玩家飞船。
+ * 职责：根据输入更新自己的位置与冷却计时；绘制自己。
+ *      它不做任何游戏规则判定（扣命、结束游戏等），那是 Game 的职责——
+ *      实体只描述"我是什么、我在哪、我长什么样"。
+ */
+class Player {
+  constructor() {
+    this.reset();
+  }
+
+  /**
+   * 复位到初始状态。
+   * @returns {void}
+   */
+  reset() {
+    this.x = CFG.W / 2;                  // 初始位置：底部正中
+    this.y = CFG.H - 70;
+    this.r = CFG.PLAYER.RADIUS;          // 碰撞半径
+    this.speed = CFG.PLAYER.SPEED;
+    this.lives = CFG.PLAYER.LIVES;
+    this.cooldown = 0;                   // 射击冷却剩余时间（秒）
+    this.invincible = 0;                 // 无敌剩余时间（秒）
+    this.tilt = 0;                       // 机身视觉倾斜（纯绘制用）
+    this.thrust = 1;                     // 尾焰强度 0~1（纯绘制用）
+
+    // ---- 冲刺状态 ----
+    this.dashTime = 0;                   // 冲刺剩余时间（> 0 表示正在冲刺）
+    this.dashCd = 0;                     // 冲刺冷却剩余时间
+    this.dashVx = 0;                     // 冲刺方向（单位向量），开始冲刺时锁定
+    this.dashVy = 0;
+
+    // ---- 道具赋予的临时状态（秒）----
+    // 全部用"独立计时器 + 每帧递减"实现，而不是布尔标记，
+    // 这样 HUD 能直接读出剩余秒数，玩家知道还剩多久，不用猜。
+    this.shieldTime = 0;                 // 护盾：受击只破盾不扣命
+    this.spreadTime = 0;                 // 散射：三向开火
+    this.rapidTime = 0;                  // 急速：射击冷却减半
+
+    // ---- 纯绘制用 ----
+    this.engineTimer = 0;                // 尾迹粒子发射节流
+    this.shieldPhase = 0;                // 护盾环旋转相位
+    this.bankGlow = 0;                   // 转向时的侧灯亮度
+
+    // ---- 武器 ----
+    // 用"已解锁集合 + 当前选中"两个字段而不是一个数字索引：
+    // 这样以后要加武器只要往集合里塞名字，切换顺序可以任意调整。
+    this.weapons = ['pulse'];            // 已解锁的武器（开局只有单发）
+    this.weapon = 'pulse';               // 当前武器
+    this.laserOn = 0;                    // 激光已持续的时间（纯视觉，用来做光柱抖动）
+  }
+
+  /**
+   * 每帧更新位置与计时器。
+   * @param {number} dt    时间步（秒）
+   * @param {object} input Input 模块（提供 left/right/up/down）
+   * @returns {void}
+   */
+  update(dt, input) {
+    // ---- 计时器统一推进 ----
+    if (this.cooldown > 0) this.cooldown -= dt;
+    if (this.invincible > 0) this.invincible -= dt;
+    if (this.dashCd > 0) this.dashCd -= dt;
+    if (this.shieldTime > 0) this.shieldTime -= dt;
+    if (this.spreadTime > 0) this.spreadTime -= dt;
+    if (this.rapidTime > 0) this.rapidTime -= dt;
+    this.shieldPhase += dt * 2.4;
+    this.engineTimer -= dt;
+    this.laserOn += dt;
+
+    // ---- 计算输入方向 ----
+    let dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+    let dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+
+    // 斜向归一化：同时按两个方向时，向量长度是 √2，
+    // 不除以长度就会让"斜着走"比"直着走"快 41%，操作手感会歪。
+    if (dx !== 0 || dy !== 0) {
+      const len = Math.hypot(dx, dy);
+      dx /= len;
+      dy /= len;
+    }
+
+    // ---- 触摸/鼠标拖动：覆盖方向键输入 ----
+    // 两种输入互斥处理而不是叠加：如果拖动的同时还按着方向键，
+    // 两套位移会打架，手感变得完全不可预测。谁"更直接"就听谁的 —— 指针更直接。
+    const ptr = input.pointer;
+    const dragging = !!(ptr && ptr.active) && this.dashTime <= 0;
+    if (dragging) {
+      // 用 1 - exp(-k·dt) 做指数插值，而不是固定比例的 lerp。
+      // 固定比例（如 x += (t-x)*0.2）会让跟随速度随帧率变化，
+      // 120Hz 手机上飞船会明显比 60Hz 更"窜"，指数形式则完全一致。
+      const t = 1 - Math.exp(-CFG.TOUCH.FOLLOW * dt);
+      this.x += (ptr.targetX - this.x) * t;
+      this.y += (ptr.targetY - this.y) * t;
+      // 倾斜沿用拖动方向，视觉上和拖动保持一致
+      dx = ptr.dx;
+      dy = ptr.dy;
+    }
+
+    // ---- 位移 ----
+    const m = CFG.PLAYER.MARGIN;
+    if (this.dashTime > 0) {
+      // 冲刺期间：忽略一切输入，沿开始冲刺时锁定的方向猛冲。
+      // 为什么锁定方向而不是实时跟随输入？因为 0.16 秒内玩家手指几乎必然会
+      // 滑到别的键上，实时跟随会让冲刺方向变得不可预测，等于把保命技变成随机技。
+      this.dashTime -= dt;
+      this.x += this.dashVx * CFG.DASH.SPEED * dt;
+      this.y += this.dashVy * CFG.DASH.SPEED * dt;
+
+      // 冲刺时尾焰拉到最亮（视觉上"推力全开"）
+      this.thrust = 1.6;
+    } else if (!dragging) {
+      // 注意这里是 `!dragging` 而不是 `!ptr.active`：
+      // 拖动时的位移已经在上面用插值算过了，这里再加一次等于速度翻倍。
+      // （这类"两处各写了一点位移"的 bug 靠肉眼几乎看不出来，只能靠条件写严）
+      this.x += dx * this.speed * dt;
+      this.y += dy * this.speed * dt;
+      // 尾焰每帧随机抖动，模拟火焰不稳定地跳动
+      this.thrust = 0.7 + Math.random() * 0.3;
+    } else {
+      this.thrust = 1.15;   // 拖动时推力略大，视觉上呼应"手在推着它走"
+      dx *= 0.7;            // 拖动到位后逐渐回正，避免机身一直歪着
+    }
+
+    // 边界限制放在两种位移之后统一处理，避免冲刺直接冲出画面
+    this.x = clamp(this.x, this.r + m, CFG.W - this.r - m);
+    this.y = clamp(this.y, CFG.H * CFG.PLAYER.Y_MIN_RATIO, CFG.H - this.r - m);
+
+    // 倾斜角朝输入方向平滑插值（*0.28 是最大倾角，dt*10 是插值速度），
+    // 用插值而不是直接赋值，转向时会有一点点惯性感，视觉上更"重"。
+    this.tilt += (dx * 0.28 - this.tilt) * Math.min(1, dt * 10);
+    // 侧灯亮度跟随转向方向：左转亮左灯、右转亮右灯，给操作一个即时视觉呼应
+    this.bankGlow = Math.abs(dx) > 0.01 ? 1 : Math.max(0, this.bankGlow - dt * 3);
+  }
+
+  /**
+   * "完全免疫"：这一状态下连接触都不该发生，碰撞检测整段跳过。
+   * @returns {boolean}
+   * 为什么必须和 isInvincible 分开：
+   *   护盾是"能挡一次"的可消耗防御，不是"碰不到"。
+   *   如果把护盾也算进这个状态，碰撞阶段就会直接跳过，
+   *   于是护盾永远不会被消耗 —— 一个不会破的护盾等于永久无敌。
+   *   （这个 bug 正是被 verify/selftest.js 场景 D 抓出来的。）
+   */
+  get isProtected() {
+    return this.invincible > 0 || this.dashTime > 0;
+  }
+
+  /**
+   * 当前是否处于某种保护之下（含护盾）。用于对外语义与 HUD 显示。
+   * @returns {boolean}
+   */
+  get isInvincible() {
+    return this.isProtected || this.shieldTime > 0;
+  }
+
+  /** @returns {boolean} 当前是否正在冲刺（用于绘制残影） */
+  get isDashing() { return this.dashTime > 0; }
+
+  /**
+   * 触发一次冲刺。
+   * @returns {boolean} 是否成功触发（冷却中会被拒绝）
+   */
+  dash(input) {
+    if (this.dashTime > 0 || this.dashCd > 0) return false;
+
+    // 方向优先级：方向键 > 拖动方向 > 默认向上。
+    // 触摸/鼠标下没有方向键，所以用"手指最近移动的方向"来冲；
+    // 若手指静止悬停，退回默认的向上冲（最常见的脱险方向）。
+    let dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+    let dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+    const ptr = input.pointer;
+    if (dx === 0 && dy === 0 && ptr && (ptr.dx !== 0 || ptr.dy !== 0)) {
+      dx = ptr.dx;
+      dy = ptr.dy;
+    }
+    if (dx === 0 && dy === 0) { dx = 0; dy = -1; }
+    const len = Math.hypot(dx, dy);
+    this.dashVx = dx / len;
+    this.dashVy = dy / len;
+
+    this.dashTime = CFG.DASH.TIME;
+    this.dashCd = CFG.DASH.COOLDOWN;
+    // 冲刺自带的无敌独立于"受击无敌"，写在 invincible 上即可（取较大值不会互相削弱）
+    this.invincible = Math.max(this.invincible, CFG.DASH.INVINCIBLE);
+    return true;
+  }
+
+  /**
+   * 尝试发射子弹。
+   * @returns {Array<Bullet>} 本次实际生成的子弹（可能 0、1、2、4 发）
+   * 说明：冷却放在这里而不是 Game 里，是为了让"射击频率"这件事
+   *      只由玩家自己负责，Game 只关心 Input.shoot 是不是按着。
+   *      返回数组而不是单发，是为了让"散射/双列"这些改弹道的机制
+   *      不需要 Game 知道任何细节 —— Game 只管把返回的子弹都塞进数组。
+   */
+  shoot() {
+    // 激光不发实体子弹：它是一条持续光束，伤害按 dt 结算。
+    // 放在冷却判断之前返回，是为了让切到激光时不会残留上一发的冷却。
+    if (this.weapon === 'laser') return [];
+
+    if (this.cooldown > 0) return [];
+
+    const W = CFG.WEAPON[this.weapon.toUpperCase()];
+    // 急速道具让冷却减半：射速翻倍，配合散射就是"弹幕覆盖"的爽感
+    const cd = W.cd * (this.rapidTime > 0 ? 0.5 : 1);
+    this.cooldown = cd;
+
+    // 子弹从机头前方出发，避免一出生就叠在机身上
+    const bx = this.x;
+    const by = this.y - this.r - 6;
+    const a = CFG.BULLET.SPREAD_ANGLE;
+    const out = [];
+
+    if (this.weapon === 'twin') {
+      // 双列用"横向平移"而不是"角度外扩"：
+      // 角度外扩在远距离会散得过开，命中率反而下降；
+      // 平行双弹道能保持两条等宽的覆盖带，清横向排开的敌机时明显更好用。
+      const o = W.offset;
+      out.push(new Bullet(bx - o, by, 0, { damage: W.dmg, twin: true }));
+      out.push(new Bullet(bx + o, by, 0, { damage: W.dmg, twin: true }));
+      // 散射道具叠加在双列上：给外侧两条各再斜射一发，共 4 发
+      if (this.spreadTime > 0) {
+        out.push(new Bullet(bx - o, by, -a, { damage: W.dmg, twin: true }));
+        out.push(new Bullet(bx + o, by, a, { damage: W.dmg, twin: true }));
+      }
+    } else {
+      // 单发：正中一发；吃到散射就变成三向
+      if (this.spreadTime > 0) {
+        out.push(new Bullet(bx, by, -a, { damage: W.dmg }));
+        out.push(new Bullet(bx, by, 0,  { damage: W.dmg }));
+        out.push(new Bullet(bx, by, a,  { damage: W.dmg }));
+      } else {
+        out.push(new Bullet(bx, by, 0, { damage: W.dmg }));
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 激光本帧应造成的伤害（按 dt 结算，而不是"每帧固定值"）。
+   * @param {number} dt 时间步（秒）
+   * @returns {number}
+   * 为什么要乘 dt：如果写成"每帧造成固定伤害"，伤害就会随帧率翻倍 ——
+   * 120Hz 手机上激光会比 60Hz 强一倍。所有"持续型"伤害都必须乘 dt。
+   */
+  laserDamage(dt) {
+    const W = CFG.WEAPON.LASER;
+    // 急速道具作用在激光上是"提高输出"而不是"缩短冷却"（激光本来就没有冷却）
+    return W.dps * (this.rapidTime > 0 ? 1.6 : 1) * dt;
+  }
+
+  /** @returns {boolean} 当前是否在使用激光 */
+  get usingLaser() { return this.weapon === 'laser'; }
+
+  /**
+   * 激光光束的矩形范围（从机头一直向上）。
+   * @returns {{x:number,y:number,w:number,h:number}}
+   */
+  get laserBeam() {
+    const W = CFG.WEAPON.LASER;
+    const top = this.y - this.r - CFG.LASER_LEN;
+    return {
+      x: this.x - W.width / 2,
+      y: top,
+      w: W.width,
+      h: this.y - this.r - top
+    };
+  }
+
+  /**
+   * 切换到指定武器。
+   * @param {string} name 武器名（'pulse' | 'twin' | 'laser'）
+   * @returns {boolean} 是否切换成功（未解锁会被拒绝）
+   */
+  switchWeapon(name) {
+    if (!this.weapons.includes(name)) return false;
+    if (this.weapon === name) return false;
+    this.weapon = name;
+    this.cooldown = 0;          // 换枪即重置冷却，避免"切枪后被上一把的冷却卡住"
+    return true;
+  }
+
+  /** 按固定顺序切到下一把已解锁武器。参数：无。返回：切换到的武器名。 */
+  cycleWeapon() {
+    const order = ['pulse', 'twin', 'laser'].filter((w) => this.weapons.includes(w));
+    if (order.length <= 1) return this.weapon;
+    const i = order.indexOf(this.weapon);
+    this.weapon = order[(i + 1) % order.length];
+    this.cooldown = 0;
+    return this.weapon;
+  }
+
+  /**
+   * 解锁一把武器。
+   * @param {string} name 武器名
+   * @returns {boolean} true 表示这是一把新武器（用于决定要不要弹提示）
+   */
+  unlockWeapon(name) {
+    if (!CFG.WEAPON[name.toUpperCase()]) return false;
+    if (this.weapons.includes(name)) return false;
+    this.weapons.push(name);
+    // 解锁即自动装备：捡到新武器却还要手动切一次，等于把奖励变成了操作负担
+    this.weapon = name;
+    this.cooldown = 0;
+    return true;
+  }
+
+  /**
+   * 绘制飞船。
+   * @param {CanvasRenderingContext2D} ctx 画布上下文
+   * @returns {void}
+   */
+  draw(ctx) {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    // ---- 冲刺残影：在机身后面拖 4 个逐渐变淡的旧位置 ----
+    // 用透明度递减的重复轮廓模拟速度线，比单纯的 motion blur 便宜得多，
+    // 但足以让"冲刺"这个动作在视觉上一眼可辨。
+    if (this.isDashing) {
+      for (let i = 4; i >= 1; i--) {
+        const k = i / 5;
+        ctx.globalAlpha = 0.16 * (1 - k) + 0.05;
+        ctx.beginPath();
+        ctx.moveTo(-this.dashVx * 14 * i, -this.dashVy * 14 * i - this.r);
+        ctx.lineTo(-this.dashVx * 14 * i + 7, -this.dashVy * 14 * i + 8);
+        ctx.lineTo(-this.dashVx * 14 * i - 7, -this.dashVy * 14 * i + 8);
+        ctx.closePath();
+        ctx.fillStyle = '#7fe8ff';
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.rotate(this.tilt * 0.5);   // 倾斜只用一半幅度，克制一点不容易看出是"整体旋转"
+
+    // 受击无敌期间闪烁：只闪"受击无敌"，护盾和冲刺各自有独立的视觉表现，
+    // 全部混在一起闪会让玩家分不清自己到底处于哪种保护状态。
+    const blink = this.invincible > 0 && this.shieldTime <= 0 && !this.isDashing;
+    if (blink && Math.sin(this.invincible * 40) < 0) {
+      ctx.restore();
+      return;
+    }
+
+    // ---- 尾焰：外焰（宽、暗）+ 内焰（窄、亮）双层 ----
+    // 单层火焰看起来像一块贴纸；分两层、长度不同、颜色不同，才有燃烧的层次。
+    const flame = (13 + this.thrust * 12) * (this.isDashing ? 1.5 : 1);
+    ctx.beginPath();
+    ctx.moveTo(-7, 11);
+    ctx.lineTo(0, 11 + flame * 1.35);
+    ctx.lineTo(7, 11);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(60, 150, 235, 0.55)';
+    ctx.shadowColor = '#4fd1ff';
+    ctx.shadowBlur = 18;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(-3.4, 11);
+    ctx.lineTo(0, 11 + flame);
+    ctx.lineTo(3.4, 11);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(215, 246, 255, 0.95)';
+    ctx.shadowBlur = 12;
+    ctx.fill();
+    ctx.shadowBlur = 0;            // 用完立刻清零，避免影响后续绘制
+
+    // ---- 后掠机翼：用渐变换色，翼尖偏冷、翼根偏暖，产生受光方向的暗示 ----
+    const wingGrad = ctx.createLinearGradient(-18, 0, 18, 0);
+    wingGrad.addColorStop(0, '#1c4468');
+    wingGrad.addColorStop(0.5, '#3f7fb5');
+    wingGrad.addColorStop(1, '#1c4468');
+    ctx.beginPath();
+    ctx.moveTo(-17, 8); ctx.lineTo(-6, -4); ctx.lineTo(-6, 12);
+    ctx.closePath();
+    ctx.moveTo(17, 8);  ctx.lineTo(6, -4);  ctx.lineTo(6, 12);
+    ctx.closePath();
+    ctx.fillStyle = wingGrad;
+    ctx.fill();
+
+    // ---- 翼尖航行灯：转向时对应一侧亮起 ----
+    if (this.bankGlow > 0.05) {
+      const side = this.tilt > 0 ? 1 : -1;
+      ctx.globalAlpha = this.bankGlow;
+      ctx.beginPath();
+      ctx.arc(side * 17, 6, 2.6, 0, TAU);
+      ctx.fillStyle = side > 0 ? '#9beaff' : '#ffb0c4';
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- 机身：朝上的四边菱形，用渐变模拟金属反光 ----
+    const g = ctx.createLinearGradient(0, -this.r - 6, 0, 15);
+    g.addColorStop(0, '#f4fbff');
+    g.addColorStop(0.45, '#a9dcff');
+    g.addColorStop(1, '#4a86c4');
+    ctx.beginPath();
+    ctx.moveTo(0, -this.r - 6);
+    ctx.lineTo(9, 10);
+    ctx.lineTo(0, 15);
+    ctx.lineTo(-9, 10);
+    ctx.closePath();
+    ctx.fillStyle = g;
+    ctx.fill();
+
+    // ---- 机身高光棱线：一条细白线沿机身中轴，金属感全靠它 ----
+    ctx.beginPath();
+    ctx.moveTo(0, -this.r - 3);
+    ctx.lineTo(0, 9);
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // ---- 座舱 ----
+    ctx.beginPath();
+    ctx.arc(0, -2, 4.5, 0, TAU);
+    ctx.fillStyle = '#0b2b4a';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(150, 230, 255, 0.9)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.restore();
+
+    // ---- 护盾环：画在旋转坐标系之外（不随机身倾斜），看起来才是"包裹"而不是"贴在机身上" ----
+    if (this.shieldTime > 0) this.drawShield(ctx);
+  }
+
+  /**
+   * 绘制护盾：旋转的双层六边形能量环 + 呼吸明暗。
+   * @param {CanvasRenderingContext2D} ctx
+   * @returns {void}
+   */
+  drawShield(ctx) {
+    const R = this.r + 13;
+    // 快到期时（最后 1.5 秒）加快闪烁，给玩家"护盾要没了"的预警
+    const expiring = this.shieldTime < 1.5;
+    const pulse = 0.72 + Math.sin(this.shieldPhase * 2.2) * 0.28;
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    ctx.globalAlpha = expiring
+      ? (Math.sin(this.shieldTime * 22) * 0.5 + 0.5) * 0.75 * pulse
+      : pulse;
+    ctx.strokeStyle = '#7fe8ff';
+    ctx.lineWidth = 2;
+    ctx.shadowColor = '#4fd1ff';
+    ctx.shadowBlur = 16;
+
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const a = (Math.PI / 3) * i + this.shieldPhase;
+      const px = Math.cos(a) * R;
+      const py = Math.sin(a) * R;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.stroke();
+
+    // 内层反向旋转且更淡，形成"能量流动"的错觉
+    ctx.globalAlpha *= 0.45;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const a = (Math.PI / 3) * i - this.shieldPhase * 1.6;
+      const px = Math.cos(a) * (R - 5);
+      const py = Math.sin(a) * (R - 5);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.stroke();
+
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+}
+
+/**
+ * 子弹：自下而上直线飞行。
+ * 位置用"中心点"存储，碰撞时再换算成左上角包围盒。
+ */
+class Bullet {
+  /**
+   * @param {number} x     出生点 x
+   * @param {number} y     出生点 y
+   * @param {number} angle 相对"正上方"的偏角（弧度，0 = 笔直向上，正数偏右）
+   *                       散射道具靠它实现；普通射击传 0 即可。
+   * @param {object} [opts] 可选覆盖项
+   *        opts.damage 单发伤害（默认取 CFG.BULLET.DAMAGE）
+   *        opts.twin   true 时用"双列"配色，让玩家一眼看出自己拿的是哪把武器
+   */
+  constructor(x, y, angle, opts) {
+    const o = opts || {};
+    this.x = x;
+    this.y = y;
+    this.angle = angle || 0;
+
+    // 预存三角函数：碰撞盒每帧都要算一次旋转后的包围盒，
+    // 而 angle 在整个飞行过程中不变，所以完全没有必要反复调用 Math.cos/sin。
+    this.cos = Math.cos(this.angle);
+    this.sin = Math.sin(this.angle);
+
+    this.vx = this.sin * CFG.BULLET.SPEED;      // 偏角带来的横向速度
+    this.vy = -this.cos * CFG.BULLET.SPEED;     // 负值 = 向上（Canvas 的 y 轴向下为正）
+    this.w = CFG.BULLET.W;
+    this.h = CFG.BULLET.H;
+    this.damage = o.damage != null ? o.damage : CFG.BULLET.DAMAGE;
+    this.twin = !!o.twin;
+    this.dead = false;                          // 死亡标记，由 Game 统一回收
+
+    // ---- 光矛拖尾：保存最近若干帧的位置，绘制时连成一条渐细的光带 ----
+    // 只在子弹内部存位置，不需要额外的 Effect 对象，
+    // 也不会干扰碰撞（碰撞只看 this.x / this.y）。
+    this.trail = [];
+  }
+
+  /**
+   * 更新位置，并标记出界。
+   * @param {number} dt 时间步（秒）
+   * @returns {void}
+   */
+  update(dt) {
+    // 拖尾先记录"当前"位置再移动，这样光带正好落在身后
+    this.trail.unshift(this.x, this.y);
+    if (this.trail.length > CFG.BULLET.TRAIL * 2) this.trail.length = CFG.BULLET.TRAIL * 2;
+
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+
+    // 飞出顶部就标记 dead，而不是在这里直接 splice。
+    // 原因：此刻很可能正在 for 循环遍历 bullets 数组，
+    //      边遍历边删除会导致索引错位、漏掉元素甚至死循环。
+    // 同时判断左右出界：散射子弹斜飞时可能从侧面离开，不回收会永远留在数组里。
+    if (this.y + this.h < 0 || this.x < -20 || this.x > CFG.W + 20) this.dead = true;
+  }
+
+  /**
+   * 左上角包围盒（供 AABB 使用）。
+   * @returns {{x:number,y:number,w:number,h:number}}
+   * 细节：子弹被旋转后，它的轴对齐包围盒会比原始 w×h 大一点点。
+   *      这里按旋转角把真实外接矩形算出来（|w·cos|+|h·sin|），
+   *      而不是偷懒用 w×h —— 否则斜射的子弹会出现"看着打中了却没判定"的鬼影。
+   *      因为 cos/sin 已缓存，这个 getter 每帧的成本几乎为零。
+   */
+  get box() {
+    const c = Math.abs(this.cos);
+    const s = Math.abs(this.sin);
+    const bw = this.w * c + this.h * s;
+    const bh = this.h * c + this.w * s;
+    return { x: this.x - bw / 2, y: this.y - bh / 2, w: bw, h: bh };
+  }
+
+  /**
+   * 绘制子弹：拖尾光带 + 头部光矛。
+   * @param {CanvasRenderingContext2D} ctx
+   * @returns {void}
+   */
+  draw(ctx) {
+    // 双列用琥珀色、单发用青白：武器状态必须能在"余光里"分辨出来，
+    // 否则切了武器玩家还得低头看 HUD 才敢确认。
+    const glow = this.twin ? '#ffcf6a' : '#7fe8ff';
+    const core = this.twin ? '#fff0c4' : '#9beeff';
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle);        // 让光矛指向飞行方向
+
+    // ---- 拖尾：由粗到细的三段渐隐，营造"高速切开空气"的拉丝感 ----
+    const seg = CFG.BULLET.TRAIL;
+    if (this.trail.length >= 4) {
+      for (let i = 1; i < seg; i++) {
+        const idx = i * 2;
+        if (idx + 1 >= this.trail.length) break;
+        const tx = this.trail[idx] - this.x;
+        const ty = this.trail[idx + 1] - this.y;
+        const k = 1 - i / seg;                     // 越靠后越淡越细
+        ctx.globalAlpha = k * 0.5;
+        ctx.beginPath();
+        ctx.arc(tx, ty, (this.w / 2) * k * 1.15, 0, TAU);
+        ctx.fillStyle = glow;
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- 头部：亮芯 + 外层辉光，两段叠出"光矛"的实体感 ----
+    ctx.shadowColor = glow;
+    ctx.shadowBlur = 14;
+    ctx.fillStyle = core;
+    ctx.fillRect(-this.w / 2 - 1, -this.h / 2 - 2, this.w + 2, this.h + 4);
+
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(-this.w / 2 + 0.6, -this.h / 2, this.w - 1.2, this.h);
+
+    ctx.restore();
+  }
+}
+
+/**
+ * 敌人：从顶部随机位置向下移动，可带横向漂移。
+ * 分两档：普通敌（1 血）与精英敌（3 血、更大、得分更高）。
+ */
+class Enemy {
+  /**
+   * @param {number} level 当前难度等级（从 1 开始）
+   */
+  constructor(level) {
+    const E = CFG.ENEMY;
+    const growth = level - 1;   // 等级成长量，多处复用
+
+    // ---- 精英判定：概率随等级线性提升，但设上限 ----
+    const eliteChance = Math.min(
+      E.ELITE_CHANCE_MAX,
+      E.ELITE_CHANCE + growth * E.ELITE_CHANCE_PER_LEVEL
+    );
+    this.elite = Math.random() < eliteChance;
+
+    this.maxHp = this.elite ? E.HP_ELITE : E.HP_NORMAL;
+    this.hp = this.maxHp;
+    this.r = this.elite ? E.RADIUS * E.ELITE_SCALE : E.RADIUS;
+
+    // ---- 出生位置：顶部上方一点点，横向随机但留出半径不贴边 ----
+    this.x = rand(this.r + 12, CFG.W - this.r - 12);
+    this.y = -this.r - 4;
+
+    // ---- 下落速度：基础速度 + 等级成长，再叠加 ±jitter 的随机浮动 ----
+    // 随机浮动是"敌人不会像一堵墙一样同速推进"的关键
+    const baseSpeed = E.BASE_SPEED + growth * E.SPEED_PER_LEVEL;
+    this.speed = baseSpeed * rand(1 - E.SPEED_JITTER, 1 + E.SPEED_JITTER);
+
+    // ---- 横向漂移：只有一部分敌人有，制造走位压力 ----
+    this.vx = Math.random() < E.DRIFT_CHANCE ? rand(-E.DRIFT, E.DRIFT) : 0;
+
+    this.spin = rand(0, Math.PI * 2);   // 自转角（纯视觉）
+    this.hitFlash = 0;                  // 受击白闪剩余时间（秒）
+    this.dead = false;
+  }
+
+  /**
+   * 更新位置与状态。
+   * @param {number} dt 时间步（秒）
+   * @returns {void}
+   */
+  update(dt) {
+    this.y += this.speed * dt;
+    this.x += this.vx * dt;
+
+    // 碰到左右边界就反弹。不能让它飘出屏幕——那样它既打不到、
+    // 又不会触发"到底扣命"，会变成一个永远存在的幽灵对象。
+    if (this.x - this.r < 0 && this.vx < 0) this.vx = -this.vx;
+    if (this.x + this.r > CFG.W && this.vx > 0) this.vx = -this.vx;
+
+    this.spin += dt * CFG.ENEMY.ROT_SPEED;
+    if (this.hitFlash > 0) this.hitFlash -= dt;
+  }
+
+  /** @returns {{x:number,y:number,w:number,h:number}} 包围盒（供 AABB 用） */
+  get box() {
+    return { x: this.x - this.r, y: this.y - this.r, w: this.r * 2, h: this.r * 2 };
+  }
+
+  /** @returns {{x:number,y:number,r:number}} 圆形轮廓（供圆形检测用） */
+  get circle() {
+    return { x: this.x, y: this.y, r: this.r };
+  }
+
+  /** @returns {boolean} 是否已经越过屏幕底部（用于扣命判定） */
+  get pastBottom() {
+    return this.y - this.r > CFG.H;
+  }
+
+  /**
+   * 受到伤害。
+   * @param {number} damage 伤害值
+   * @returns {boolean} true 表示这次伤害导致敌人被击毁
+   */
+  hit(damage) {
+    this.hp -= damage;
+    this.hitFlash = 0.12;   // 白闪一瞬间，给玩家明确的命中反馈
+    return this.hp <= 0;
+  }
+
+  /**
+   * 绘制敌人。
+   * @param {CanvasRenderingContext2D} ctx
+   * @returns {void}
+   */
+  draw(ctx) {
+    const R = this.r;
+    const flash = this.hitFlash > 0;
+    const T = this.spin;
+    const now = this.spin;   // 自转相位顺带当动画时钟用，省一个计时器字段
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    // 受击瞬间整体变白，是"我打中了"最廉价也最有效的视觉反馈
+    const hot = this.elite ? '#ffb457' : '#ff5d7a';
+    const bodyColor = flash ? '#ffffff' : hot;
+
+    if (this.elite) {
+      // ================= 精英敌 =================
+      ctx.rotate(T);
+
+      // ---- 外圈脉冲环：用六边形描边而非 arc() ----
+      // 刻意的实现约束：普通敌的绘制路径里不能出现半径 > 10 的 arc()，
+      // 否则自检脚本里"是否存在大半径圆"这条精英分支判据就失去意义了。
+      const pulse = R * (1.16 + Math.sin(now * 2.4) * 0.07);
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = (Math.PI / 3) * i - Math.PI / 2;
+        const px = Math.cos(a) * pulse;
+        const py = Math.sin(a) * pulse;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.strokeStyle = 'rgba(255, 180, 87, 0.5)';
+      ctx.lineWidth = 1.6;
+      ctx.shadowColor = hot;
+      ctx.shadowBlur = 14;
+      ctx.stroke();
+
+      // ---- 主体六边形：径向渐变让它看起来是个有体积的壳，而不是一块色板 ----
+      const shell = ctx.createLinearGradient(0, -R, 0, R);
+      shell.addColorStop(0, flash ? '#ffffff' : '#ffd79a');
+      shell.addColorStop(0.55, bodyColor);
+      shell.addColorStop(1, flash ? '#ffffff' : '#b45c14');
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = (Math.PI / 3) * i - Math.PI / 2;
+        const px = Math.cos(a) * R;
+        const py = Math.sin(a) * R;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fillStyle = shell;
+      ctx.shadowBlur = 18;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // ---- 内饰棱线：三条径向线，让六边形内部有结构感 ----
+      ctx.beginPath();
+      for (let i = 0; i < 3; i++) {
+        const a = (Math.PI / 3) * i * 2 - Math.PI / 2;
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(a) * R * 0.82, Math.sin(a) * R * 0.82);
+      }
+      ctx.strokeStyle = 'rgba(80, 35, 0, 0.42)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // ---- 内核：半径 R*0.45 ≈ 12px，这是自检用来识别"精英分支"的标志圆 ----
+      ctx.beginPath();
+      ctx.arc(0, 0, R * 0.45, 0, TAU);
+      ctx.fillStyle = '#3a1d05';
+      ctx.fill();
+      // 内核里的能量亮点随呼吸缩放
+      ctx.beginPath();
+      ctx.arc(0, 0, R * 0.45 * (0.42 + Math.sin(now * 3.6) * 0.16), 0, TAU);
+      ctx.fillStyle = '#ffdc9a';
+      ctx.shadowColor = '#ffb457';
+      ctx.shadowBlur = 16;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      ctx.restore();
+
+      // ---- 精英敌血条：画在包围盒上方，不跟随自转（否则会晃得看不清）----
+      // 高度固定 4px 是给自检留的识别特征（用 fillRect 的尺寸反查敌人类型）
+      if (this.hp > 0) {
+        const w = R * 2;
+        const ratio = this.hp / this.maxHp;
+        ctx.save();
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+        ctx.fillRect(this.x - w / 2, this.y - R - 9, w, 4);
+        ctx.fillStyle = ratio > 0.5 ? '#ffd479' : '#ff7a7a';
+        ctx.fillRect(this.x - w / 2, this.y - R - 9, w * ratio, 4);
+        ctx.restore();
+      }
+      return;
+    }
+
+    // ================= 普通敌 =================
+    ctx.rotate(Math.sin(T) * 0.14);   // 普通敌只做小幅摇摆，不做整圈自转（否则像在翻滚）
+
+    // ---- 外层机壳：尖头朝下的三角 ----
+    const hull = ctx.createLinearGradient(0, -R * 0.8, 0, R);
+    hull.addColorStop(0, flash ? '#ffffff' : '#8e2540');
+    hull.addColorStop(0.5, bodyColor);
+    hull.addColorStop(1, flash ? '#ffffff' : '#ff5570');
+    ctx.beginPath();
+    ctx.moveTo(0, R);
+    ctx.lineTo(-R * 0.92, -R * 0.8);
+    ctx.lineTo(R * 0.92, -R * 0.8);
+    ctx.closePath();
+    ctx.fillStyle = hull;
+    ctx.shadowColor = hot;
+    ctx.shadowBlur = 12;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // ---- 内侧装甲板：同形状缩到 62%，颜色更深，制造"双层壳体"的厚度 ----
+    ctx.beginPath();
+    ctx.moveTo(0, R * 0.66);
+    ctx.lineTo(-R * 0.52, -R * 0.42);
+    ctx.lineTo(R * 0.52, -R * 0.42);
+    ctx.closePath();
+    ctx.fillStyle = flash ? '#ffffff' : 'rgba(40, 8, 20, 0.55)';
+    ctx.fill();
+
+    // ---- 顶部双推进器喷口：两个上扬的小三角 + 光点，暗示敌人是"飞下来"的 ----
+    ctx.beginPath();
+    ctx.moveTo(-R * 0.62, -R * 0.8);
+    ctx.lineTo(-R * 0.30, -R * 1.02);
+    ctx.lineTo(-R * 0.18, -R * 0.62);
+    ctx.closePath();
+    ctx.moveTo(R * 0.62, -R * 0.8);
+    ctx.lineTo(R * 0.30, -R * 1.02);
+    ctx.lineTo(R * 0.18, -R * 0.62);
+    ctx.closePath();
+    ctx.fillStyle = flash ? '#ffffff' : '#7a1c33';
+    ctx.fill();
+
+    // 喷口光点（半径 2 左右，远小于 10，不会干扰自检判据）
+    ctx.beginPath();
+    ctx.arc(-R * 0.40, -R * 0.84, R * 0.13, 0, TAU);
+    ctx.moveTo(R * 0.40 + R * 0.13, -R * 0.84);
+    ctx.arc(R * 0.40, -R * 0.84, R * 0.13, 0, TAU);
+    ctx.fillStyle = flash ? '#ffffff' : 'rgba(255, 200, 220, 0.9)';
+    ctx.fill();
+
+    // ---- 核心"眼"：半径 R*0.30 ≈ 5px ----
+    ctx.beginPath();
+    ctx.arc(0, -R * 0.15, R * 0.30, 0, TAU);
+    ctx.fillStyle = flash ? '#ffffff' : '#2a0710';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(0, -R * 0.15, R * 0.30 * 0.5, 0, TAU);
+    ctx.fillStyle = flash ? '#ffffff' : '#ff8ea3';
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+/**
+ * 粒子：爆炸碎片。带初速度 + 指数阻尼 + 渐隐。
+ */
+class Particle {
+  /**
+   * @param {number} x     初始 x
+   * @param {number} y     初始 y
+   * @param {number} vx    初速度 x（像素/秒）
+   * @param {number} vy    初速度 y
+   * @param {number} life  寿命（秒）
+   * @param {string} color 颜色
+   * @param {number} size  初始半径
+   */
+  constructor(x, y, vx, vy, life, color, size) {
+    this.reset(x, y, vx, vy, life, color, size);
+  }
+
+  /**
+   * 重置粒子参数（复用对象，减少垃圾回收压力）。
+   * @returns {void} 参数含义同构造函数
+   */
+  reset(x, y, vx, vy, life, color, size) {
+    this.x = x;
+    this.y = y;
+    this.vx = vx;
+    this.vy = vy;
+    this.life = life;
+    this.maxLife = life;   // 保存初始寿命，用于计算渐隐比例
+    this.color = color;
+    this.size = size;
+    this.dead = false;
+  }
+
+  /**
+   * 更新粒子。
+   * @param {number} dt 时间步（秒）
+   * @returns {void}
+   */
+  update(dt) {
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+
+    // 指数阻尼：v *= e^(-k·dt)。
+    // 为什么不用 v *= 0.95 这种写法？因为那是"每帧"衰减，
+    // 60Hz 和 144Hz 下粒子会明显一个跑得远、一个跑得近，帧率不一致就不公平。
+    // 用 e^(-k·dt) 才能保证"单位时间内的衰减量"与帧率无关。
+    const damp = Math.exp(-CFG.PARTICLE.DAMPING * dt);
+    this.vx *= damp;
+    this.vy *= damp;
+
+    this.life -= dt;
+    if (this.life <= 0) this.dead = true;
+  }
+
+  /**
+   * 绘制粒子。
+   * @param {CanvasRenderingContext2D} ctx
+   * @returns {void}
+   */
+  draw(ctx) {
+    const t = this.life / this.maxLife;   // 1 → 0 的生命比例
+    ctx.globalAlpha = t;                  // 越接近死亡越透明
+    ctx.fillStyle = this.color;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size * t, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;                  // 立刻复位，避免污染后续绘制
+  }
+}
+
+/**
+ * 背景星：靠 z（深度）分层做视差滚动。
+ * 远处的星暗而慢，近处的星亮而快，画面立刻有了纵深。
+ */
+class Star {
+  constructor() {
+    this.reset(true);
+  }
+
+  /**
+   * 重置一颗星。
+   * @param {boolean} randomY true = 在整屏随机位置生成（初始化用），
+   *                          false = 从顶部重新进入（滚动出界后复用）
+   * @returns {void}
+   */
+  reset(randomY) {
+    this.x = Math.random() * CFG.W;
+    this.y = randomY ? Math.random() * CFG.H : -3;
+    this.z = Math.random();                          // 深度 0（远）~ 1（近）
+    this.speed = 16 + this.z * 90;                   // 越近越快
+    this.size = 0.6 + this.z * 1.6;                  // 越近越大
+    // 每颗星给一个独立的闪烁相位。如果所有星同相位，整片天会一起明一起暗，
+    // 看起来像画面在闪故障；独立相位才是"各自闪烁"的自然感。
+    this.phase = Math.random() * TAU;
+  }
+
+  /**
+   * 更新：向下滚动，出界后从顶部复用。
+   * @param {number} dt 时间步（秒，已按状态乘过倍率）
+   * @returns {void}
+   */
+  update(dt) {
+    this.y += this.speed * dt;
+    this.phase += dt * CFG.STAR_TWINKLE * (0.5 + this.z);
+    if (this.y > CFG.H + 3) this.reset(false);
+  }
+
+  /**
+   * 绘制一颗星。
+   * @param {CanvasRenderingContext2D} ctx
+   * @returns {void}
+   */
+  draw(ctx) {
+    const tw = 0.72 + Math.sin(this.phase) * 0.28;   // 闪烁系数 0.44~1
+    const a = (0.2 + this.z * 0.7) * tw;
+    ctx.globalAlpha = a;
+    ctx.fillStyle = '#cfe8ff';
+    ctx.fillRect(this.x, this.y, this.size, this.size);
+
+    // ---- 近星的十字星芒 ----
+    // 只给 z 足够大的少数星画，全部画会糊成一片白噪点。
+    // 用两条细矩形（而不是带 shadowBlur 的线条）是有意为之：
+    // shadowBlur 每帧调用上百次会明显掉帧，矩形几乎零成本。
+    if (this.z > CFG.STAR_CROSS_MIN_Z) {
+      const L = this.size * 6;
+      ctx.globalAlpha = a * 0.42;
+      ctx.fillRect(this.x - L / 2 + this.size / 2, this.y + this.size / 2 - 0.4, L, 0.8);
+      ctx.fillRect(this.x + this.size / 2 - 0.4, this.y - L / 2 + this.size / 2, 0.8, L);
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+/**
+ * 星云团：一团非常淡的彩色雾，缓慢平移并循环。
+ * 作用是把"纯黑背景 + 白点"变成有色彩层次的深空，
+ * 同时给静止的菜单界面一点缓慢的生命感。
+ */
+class Nebula {
+  /**
+   * @param {number} i 序号（用来错开初始位置与色调）
+   */
+  constructor(i) {
+    this.x = rand(0, CFG.W);
+    this.y = rand(0, CFG.H);
+    this.r = rand(120, 230);
+    this.speed = rand(3, 9);            // 极慢，几乎察觉不到在动，但画面不"死"
+    this.hue = pick(['#2a4fd0', '#7a2fb0', '#1e6fa8', '#b0468f']);
+    this.alpha = rand(0.05, 0.11);
+    this.phase = rand(0, TAU) + i;
+  }
+
+  /** @param {number} dt 时间步（秒） @returns {void} */
+  update(dt) {
+    this.y += this.speed * dt;
+    if (this.y - this.r > CFG.H) { this.y = -this.r; this.x = rand(0, CFG.W); }
+    this.phase += dt * 0.35;
+  }
+
+  /** @param {CanvasRenderingContext2D} ctx @returns {void} */
+  draw(ctx) {
+    // 呼吸透明度：让星云缓慢明暗变化，配合漂移产生"气体在流动"的错觉
+    const a = this.alpha * (0.75 + Math.sin(this.phase) * 0.25);
+    const g = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.r);
+    g.addColorStop(0, this.hue);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.globalAlpha = a;
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r, 0, TAU);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+/**
+ * 流星：偶尔划过画面的短促光迹。
+ * 纯装饰，但它承担一个具体的职能 —— 让背景在"没有战斗发生"的时间里
+ * 也有偶发事件，避免玩家在等待新一波时觉得屏幕是静止的。
+ */
+class Meteor {
+  constructor() {
+    // 从上半屏随机横向位置出发，斜向右下（和星空下落的整体方向一致）
+    this.x = rand(-60, CFG.W * 0.75);
+    this.y = rand(-40, CFG.H * 0.35);
+    const sp = rand(CFG.METEOR.SPEED_MIN, CFG.METEOR.SPEED_MAX);
+    const ang = rand(0.55, 0.95);          // 与水平方向夹角，约 31°~54°
+    this.vx = Math.cos(ang) * sp;
+    this.vy = Math.sin(ang) * sp;
+    this.life = CFG.METEOR.LIFE;
+    this.maxLife = this.life;
+    this.len = rand(46, 110);
+    this.dead = false;
+  }
+
+  /** @param {number} dt 时间步（秒） @returns {void} */
+  update(dt) {
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+    this.life -= dt;
+    if (this.life <= 0 || this.y > CFG.H + 120) this.dead = true;
+  }
+
+  /** @param {CanvasRenderingContext2D} ctx @returns {void} */
+  draw(ctx) {
+    const t = this.life / this.maxLife;
+    const d = Math.hypot(this.vx, this.vy) || 1;
+    const ux = this.vx / d;
+    const uy = this.vy / d;
+
+    // 头亮尾淡的线性渐变，是"流星"和"一条线"的区别所在
+    const g = ctx.createLinearGradient(
+      this.x, this.y,
+      this.x - ux * this.len, this.y - uy * this.len
+    );
+    g.addColorStop(0, 'rgba(255,255,255,' + (0.85 * t).toFixed(3) + ')');
+    g.addColorStop(0.35, 'rgba(150,225,255,' + (0.4 * t).toFixed(3) + ')');
+    g.addColorStop(1, 'rgba(80,150,255,0)');
+
+    ctx.strokeStyle = g;
+    ctx.lineWidth = 1.8;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(this.x, this.y);
+    ctx.lineTo(this.x - ux * this.len, this.y - uy * this.len);
+    ctx.stroke();
+  }
+}
+
+/**
+ * 冲击波圆环：爆炸时向外扩张的一圈光。
+ * 为什么爆炸里必须有它：单靠粒子只会让人看到"碎屑散开"，
+ * 而一圈快速扩张的环才传达"能量释放"这件事，也是所有动作游戏爆炸的标配。
+ */
+class Shockwave {
+  /**
+   * @param {number} x     圆心 x
+   * @param {number} y     圆心 y
+   * @param {number} maxR  最大半径（像素）
+   * @param {string} color 环颜色
+   * @param {number} life  存活时长（秒）
+   */
+  constructor(x, y, maxR, color, life) {
+    this.x = x;
+    this.y = y;
+    this.maxR = maxR;
+    this.color = color;
+    this.life = life;
+    this.maxLife = life;
+    this.dead = false;
+  }
+
+  /** @param {number} dt 时间步（秒） @returns {void} */
+  update(dt) {
+    this.life -= dt;
+    if (this.life <= 0) this.dead = true;
+  }
+
+  /** @param {CanvasRenderingContext2D} ctx @returns {void} */
+  draw(ctx) {
+    // p 从 0 走到 1
+    const p = 1 - this.life / this.maxLife;
+    // 半径用"先快后慢"的开方曲线：爆炸初期扩张极快，之后减速，
+    // 这是真实冲击波的观感；线性扩张会显得很假。
+    const r = this.maxR * Math.sqrt(p);
+    ctx.globalAlpha = (1 - p) * 0.85;
+    ctx.strokeStyle = this.color;
+    ctx.lineWidth = Math.max(0.5, 4.5 * (1 - p));   // 越扩张越细
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, r, 0, TAU);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+}
+
+/**
+ * 飘字：击杀得分 / 连击提示 / 道具名，从产生点向上飘并淡出。
+ * 存在的意义是把"分数变化"这件抽象的事情落到具体位置和具体时刻上，
+ * 玩家的注意力在画面上移动，飘字让每次击杀都有即时的正反馈落点。
+ */
+class FloatText {
+  /**
+   * @param {number} x     起始 x
+   * @param {number} y     起始 y
+   * @param {string} text  文本
+   * @param {string} color 颜色
+   * @param {number} size  字号（像素）
+   * @param {number} life  存活时长（秒）
+   */
+  constructor(x, y, text, color, size, life) {
+    this.x = x;
+    this.y = y;
+    this.text = text;
+    this.color = color;
+    this.size = size;
+    this.life = life;
+    this.maxLife = life;
+    this.vy = -46;                 // 上浮速度（像素/秒）
+    this.dead = false;
+  }
+
+  /** @param {number} dt 时间步（秒） @returns {void} */
+  update(dt) {
+    this.y += this.vy * dt;
+    // 上浮逐渐减速，像被空气拖住，比匀速上飘更自然
+    this.vy *= Math.exp(-2.2 * dt);
+    this.life -= dt;
+    if (this.life <= 0) this.dead = true;
+  }
+
+  /** @param {CanvasRenderingContext2D} ctx @returns {void} */
+  draw(ctx) {
+    const t = this.life / this.maxLife;
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, t * 1.8);   // 前段保持不透明，最后 55% 才开始淡出
+    ctx.font = '700 ' + this.size + 'px Consolas, "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = this.color;
+    ctx.shadowColor = this.color;
+    ctx.shadowBlur = 10;
+    ctx.fillText(this.text, this.x, this.y);
+    ctx.restore();
+  }
+}
+
+/**
+ * 道具：击毁敌机后按概率掉落，缓慢下落。
+ * 五种类型各自解决一个具体困境，而不是单纯的数值奖励。
+ */
+class PowerUp {
+  /**
+   * @param {string} type 类型键（shield / spread / rapid / bomb / life）
+   * @param {number} x    出生 x
+   * @param {number} y    出生 y
+   */
+  constructor(type, x, y) {
+    this.type = type;
+    this.x = x;
+    this.y = y;
+    this.r = CFG.POWERUP.SIZE;
+    this.vy = CFG.POWERUP.FALL_SPEED;
+    this.vx = rand(-CFG.POWERUP.DRIFT, CFG.POWERUP.DRIFT);
+    this.phase = rand(0, TAU);
+    this.dead = false;
+    this.taken = false;              // true = 已被拾取，用于放拾取特效
+    this.def = PowerUp.TYPES[type];
+  }
+
+  /** @param {number} dt 时间步（秒） @returns {void} */
+  update(dt) {
+    this.phase += dt * 2.6;
+    this.y += this.vy * dt;
+    this.x += this.vx * dt;
+    // 碰到左右边界反弹：道具飘出画面等于白掉，玩家会觉得很亏
+    if (this.x - this.r < 0 && this.vx < 0) this.vx = -this.vx;
+    if (this.x + this.r > CFG.W && this.vx > 0) this.vx = -this.vx;
+    if (this.y - this.r > CFG.H) this.dead = true;
+  }
+
+  /** @returns {{x:number,y:number,r:number}} 圆形轮廓，供拾取判定用 */
+  get circle() { return { x: this.x, y: this.y, r: this.r }; }
+
+  /** @param {CanvasRenderingContext2D} ctx @returns {void} */
+  draw(ctx) {
+    const D = this.def;
+    const breathe = 1 + Math.sin(this.phase) * 0.08;
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.scale(breathe, breathe);
+
+    // ---- 外圈光晕：颜色即类型，玩家不用读字也能一眼分辨 ----
+    ctx.globalAlpha = 0.24;
+    ctx.beginPath();
+    ctx.arc(0, 0, this.r * 1.55, 0, TAU);
+    ctx.fillStyle = D.color;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // ---- 旋转的胶囊外壳：外框不断转 = 视觉上"这是可拾取物"的通用语言 ----
+    ctx.save();
+    ctx.rotate(this.phase * 0.6);
+    ctx.beginPath();
+    ctx.moveTo(0, -this.r);
+    ctx.lineTo(this.r, 0);
+    ctx.lineTo(0, this.r);
+    ctx.lineTo(-this.r, 0);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(6, 14, 26, 0.9)';
+    ctx.strokeStyle = D.color;
+    ctx.lineWidth = 2;
+    ctx.shadowColor = D.color;
+    ctx.shadowBlur = 14;
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+
+    // ---- 类型图标：用最简单的几何符号画，不依赖字体/图片 ----
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = D.color;
+    ctx.fillStyle = D.color;
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    const s = this.r * 0.46;
+    ctx.beginPath();
+    switch (this.type) {
+      case 'shield':                                  // 盾牌轮廓
+        ctx.moveTo(0, -s);
+        ctx.lineTo(s, -s * 0.35);
+        ctx.lineTo(s * 0.7, s * 0.8);
+        ctx.lineTo(0, s);
+        ctx.lineTo(-s * 0.7, s * 0.8);
+        ctx.lineTo(-s, -s * 0.35);
+        ctx.closePath();
+        ctx.stroke();
+        break;
+      case 'spread':                                  // 三向箭头
+        ctx.moveTo(-s, s * 0.7);  ctx.lineTo(-s * 0.6, -s * 0.7);
+        ctx.moveTo(0, s * 0.9);   ctx.lineTo(0, -s);
+        ctx.moveTo(s, s * 0.7);   ctx.lineTo(s * 0.6, -s * 0.7);
+        ctx.stroke();
+        break;
+      case 'rapid':                                   // 闪电
+        ctx.moveTo(s * 0.4, -s);
+        ctx.lineTo(-s * 0.35, s * 0.1);
+        ctx.lineTo(s * 0.1, s * 0.1);
+        ctx.lineTo(-s * 0.35, s);
+        ctx.stroke();
+        break;
+      case 'bomb':                                    // 同心圆（爆炸）
+        ctx.arc(0, 0, s * 0.95, 0, TAU);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(0, 0, s * 0.38, 0, TAU);
+        ctx.fill();
+        break;
+      case 'twin':                                    // 两条平行弹道
+        ctx.moveTo(-s * 0.5, s);
+        ctx.lineTo(-s * 0.5, -s * 0.75);
+        ctx.moveTo(s * 0.5, s);
+        ctx.lineTo(s * 0.5, -s * 0.75);
+        ctx.stroke();
+        // 顶部箭头，强调"向上打"的方向感
+        ctx.beginPath();
+        ctx.moveTo(-s, -s * 0.4); ctx.lineTo(-s * 0.5, -s); ctx.lineTo(0, -s * 0.4);
+        ctx.moveTo(0, -s * 0.4);  ctx.lineTo(s * 0.5, -s);  ctx.lineTo(s, -s * 0.4);
+        ctx.stroke();
+        break;
+      case 'laser':                                   // 中心光束 + 两侧放射
+        ctx.moveTo(0, s);
+        ctx.lineTo(0, -s);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(-s * 0.75, -s * 0.15); ctx.lineTo(-s * 0.3, -s * 0.55);
+        ctx.moveTo(s * 0.75, -s * 0.15);  ctx.lineTo(s * 0.3, -s * 0.55);
+        ctx.stroke();
+        break;
+      default:                                        // life：加号
+        ctx.moveTo(-s, 0); ctx.lineTo(s, 0);
+        ctx.moveTo(0, -s); ctx.lineTo(0, s);
+        ctx.stroke();
+        break;
+    }
+    ctx.restore();
+  }
+}
+
+/**
+ * 道具类型表。
+ * 把"权重 + 颜色 + 名称"集中成一张表，抽类型时只查表，
+ * 以后想加新道具只需往这里加一行，不必动任何逻辑代码。
+ */
+PowerUp.TYPES = {
+  shield: { weight: 26, color: '#7fe8ff', label: '护盾 SHIELD', toast: '护盾展开' },
+  spread: { weight: 24, color: '#ffb457', label: '散射 SPREAD', toast: '三向散射' },
+  rapid:  { weight: 22, color: '#b48cff', label: '急速 RAPID',  toast: '射速提升' },
+  bomb:   { weight: 16, color: '#ff6b8a', label: '炸弹 BOMB',   toast: '全屏爆破' },
+  life:   { weight: 10, color: '#8dffb0', label: '增援 +1',     toast: '生命 +1' },
+
+  // ---- 武器解锁 ----
+  // 权重刻意给得不低：武器是"改变玩法"的奖励，拿到后整局体验都不同，
+  // 掉率太低等于白做了三种武器。但也不会在已解锁后继续掉落 ——
+  // 那样它们就退化成"占掉一次道具机会"，见 maybeDrop() 里的过滤。
+  twin:   { weight: 14, color: '#ffcf6a', label: '双列 TWIN',  toast: '解锁 双列', weapon: 'twin' },
+  laser:  { weight: 12, color: '#b48cff', label: '激光 LASER', toast: '解锁 激光', weapon: 'laser' }
+};
+
+/**
+ * 从类型表推导出的权重表，供 weightedPick() 使用。
+ * 单独推导而不是手写第二份，是为了避免"加了新道具却忘了在权重表里登记"
+ * 这种只会在运行到那一步才暴露的漏洞。
+ */
+PowerUp.WEIGHTS = (function () {
+  const w = {};
+  const keys = Object.keys(PowerUp.TYPES);
+  for (let i = 0; i < keys.length; i++) w[keys[i]] = PowerUp.TYPES[keys[i]].weight;
+  return w;
+})();
+
+/**
+ * 敌方子弹：由 Boss 发射，向下（或朝玩家）飞行。
+ * 用独立类而不是复用 Bullet，是因为两者差异很大：飞行方向相反、
+ * 需要与玩家做圆形碰撞、还要带自转和脉动 —— 塞进一个类只会变成一堆 if。
+ */
+class EnemyBullet {
+  /**
+   * @param {number} x     出生 x
+   * @param {number} y     出生 y
+   * @param {number} vx    速度 x
+   * @param {number} vy    速度 y
+   * @param {string} color 颜色
+   */
+  constructor(x, y, vx, vy, color) {
+    this.x = x;
+    this.y = y;
+    this.vx = vx;
+    this.vy = vy;
+    this.r = CFG.BOSS.BULLET_RADIUS;
+    this.color = color;
+    this.phase = 0;
+    this.dead = false;
+  }
+
+  /** @param {number} dt 时间步（秒） @returns {void} */
+  update(dt) {
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+    this.phase += dt * 6;
+    // 出界即回收（含左右），否则斜射的弹会滞留在数组里
+    if (this.y - this.r > CFG.H || this.y + this.r < -20 ||
+        this.x < -30 || this.x > CFG.W + 30) this.dead = true;
+  }
+
+  /** @returns {{x:number,y:number,r:number}} 圆形轮廓，供玩家碰撞判定 */
+  get circle() { return { x: this.x, y: this.y, r: this.r }; }
+
+  /** @param {CanvasRenderingContext2D} ctx @returns {void} */
+  draw(ctx) {
+    const pulse = 1 + Math.sin(this.phase) * 0.14;
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    ctx.globalAlpha = 0.3;
+    ctx.beginPath();
+    ctx.arc(0, 0, this.r * 2 * pulse, 0, TAU);
+    ctx.fillStyle = this.color;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    ctx.beginPath();
+    ctx.arc(0, 0, this.r * pulse, 0, TAU);
+    ctx.fillStyle = this.color;
+    ctx.shadowColor = this.color;
+    ctx.shadowBlur = 14;
+    ctx.fill();
+
+    // 内层白点：让子弹有"高能量核心"的读感，也和玩家的青色子弹区分开
+    ctx.shadowBlur = 0;
+    ctx.beginPath();
+    ctx.arc(0, 0, this.r * 0.42, 0, TAU);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+/**
+ * Boss：每 5 级出现的阶段性敌人。
+ * 三个设计要点：
+ *   1) 它不"扔下来"，而是横向机动 —— 强迫玩家在水平方向做长距离走位；
+ *   2) 它发射慢速瞄准弹 —— 威胁来自"必须移动"而不是"反应速度"；
+ *   3) 它不越过底部扣命 —— Boss 战只有一个失败条件：玩家被弹打光血。
+ */
+class Boss {
+  /**
+   * @param {number} index 第几个 Boss（从 1 开始），决定血量与分数
+   */
+  constructor(index) {
+    const B = CFG.BOSS;
+    this.index = index;
+    this.maxHp = B.BASE_HP + (index - 1) * B.HP_PER_BOSS;
+    this.hp = this.maxHp;
+    this.r = B.RADIUS;
+    this.x = CFG.W / 2;
+    this.y = -B.RADIUS - 10;          // 从画面上方进场
+    this.entered = false;             // 是否已经就位（未就位时不攻击）
+    this.sway = 0;                    // 横向摆动相位
+    this.fireTimer = B.FIRE_INTERVAL * 0.8;
+    this.spin = 0;
+    this.hitFlash = 0;
+    this.dead = false;
+    this.score = B.SCORE + (index - 1) * B.SCORE_PER_BOSS;
+
+    // ---- 阶段状态 ----
+    this.phase = 1;                   // 当前阶段 1/2/3
+    this.phaseFlash = 0;              // 切换阶段的爆闪（0.6 秒）—— 给"它变了"一个明确的视觉信号
+  }
+
+  /** @param {number} dt 时间步（秒） @returns {void} */
+  update(dt) {
+    const B = CFG.BOSS;
+    this.spin += dt * 0.5;
+    if (this.hitFlash > 0) this.hitFlash -= dt;
+    if (this.phaseFlash > 0) this.phaseFlash -= dt;
+
+    if (!this.entered) {
+      // 进场阶段：匀速下压到指定高度，期间不攻击。
+      // 给玩家一点"它来了"的缓冲时间，而不是一出现就开火。
+      this.y += 70 * dt;
+      if (this.y >= B.ENTER_Y) { this.y = B.ENTER_Y; this.entered = true; }
+      return;
+    }
+
+    // ---- 横向正弦机动 ----
+    // 摆动速度随阶段提升：三阶段的 BOSS 移动得又快又没有规律感（视觉上），
+    // 玩家不能再靠"站在它下一次经过的位置"来预判输出。
+    this.sway += dt * this.swaySpeed;
+    this.x = CFG.W / 2 + Math.sin(this.sway) * B.SWAY_RANGE;
+
+    this.fireTimer -= dt;
+  }
+
+  /**
+   * 当前阶段（1 = 常规，2 = 加速，3 = 狂暴）。
+   * 按剩余血量比例算而不是按"被打了几次"：
+   * 这样后续血量更厚的 BOSS 会自动落进同一套阈值，不需要另配一套数值。
+   * @returns {number} 1 | 2 | 3
+   */
+  get phaseByHp() {
+    const B = CFG.BOSS;
+    const ratio = this.hp / this.maxHp;
+    if (ratio <= B.PHASE_3_AT) return 3;
+    if (ratio <= B.PHASE_2_AT) return 2;
+    return 1;
+  }
+
+  /**
+   * 同步阶段：检测到阶段变化时置位 phaseFlash 并返回新阶段。
+   * 由 Game 每帧调用（Game 拿到"刚变阶段"的信号才好播横幅/震动）。
+   * @returns {number|null} 本帧刚进入的新阶段；没有变化返回 null
+   */
+  syncPhase() {
+    const p = this.phaseByHp;
+    if (p === this.phase) return null;
+    this.phase = p;
+    this.phaseFlash = 0.6;
+    // 阶段切换立刻重置开火计时器：让"变阶段"和"下一波弹幕"之间有最短 0.4 秒间隔，
+    // 否则玩家可能在同一瞬间既要点清旧弹幕又要应对新形态，纯粹是运气问题
+    this.fireTimer = 0.4;
+    return p;
+  }
+
+  /** @returns {number} 当前阶段的横移角速度 */
+  get swaySpeed() {
+    const B = CFG.BOSS;
+    if (this.phase >= 3) return B.SWAY_SPEED_3;
+    if (this.phase === 2) return B.SWAY_SPEED_2;
+    return B.SWAY_SPEED;
+  }
+
+  /** @returns {number} 当前阶段的开火间隔 */
+  get fireInterval() {
+    const B = CFG.BOSS;
+    if (this.phase >= 3) return B.FIRE_INTERVAL_3;
+    if (this.phase === 2) return B.FIRE_INTERVAL_2;
+    return B.FIRE_INTERVAL;
+  }
+
+  /** @returns {number} 当前阶段一次射出的扇形弹数（1 = 单发瞄准弹） */
+  get spreadCount() {
+    const B = CFG.BOSS;
+    if (this.phase >= 3) return B.SPREAD_3;
+    if (this.phase === 2) return B.SPREAD_2;
+    return 1;
+  }
+
+  /** @returns {boolean} 当前阶段是否附带环形弹幕（仅三阶段） */
+  get hasRing() { return this.phase >= 3; }
+
+  /** @returns {boolean} 是否该开火了（由 Game 负责实际生成子弹并复位计时器） */
+  get wantsToFire() {
+    return this.entered && this.fireTimer <= 0;
+  }
+
+  /** 复位开火计时器。参数：无。返回：无。 */
+  resetFire() {
+    // 加入 ±25% 随机浮动：固定节奏会被玩家背板，随机化后必须临场反应。
+    // 三阶段浮动收窄到 ±12%，让狂暴阶段的压迫感更连贯（不再有长空档）。
+    const j = this.phase >= 3 ? 0.12 : 0.25;
+    this.fireTimer = this.fireInterval * rand(1 - j, 1 + j);
+  }
+
+  /** @returns {{x:number,y:number,w:number,h:number}} 包围盒（供 AABB 用） */
+  get box() {
+    return { x: this.x - this.r, y: this.y - this.r, w: this.r * 2, h: this.r * 2 };
+  }
+
+  /** @returns {{x:number,y:number,r:number}} 圆形轮廓（供玩家碰撞用） */
+  get circle() { return { x: this.x, y: this.y, r: this.r }; }
+
+  /**
+   * 受到伤害。
+   * @param {number} damage 伤害值
+   * @returns {boolean} true 表示被击毁
+   */
+  hit(damage) {
+    this.hp -= damage;
+    this.hitFlash = 0.1;
+    return this.hp <= 0;
+  }
+
+  /** @param {CanvasRenderingContext2D} ctx @returns {void} */
+  draw(ctx) {
+    const R = this.r;
+    const flash = this.hitFlash > 0 || this.phaseFlash > 0;
+    // 三阶段用三套配色：玩家必须能在"余光里"就判断出 BOSS 现在是什么形态，
+    // 否则阶段切换就只是"数值变了"，玩家感受不到，也就谈不上重新学习应对方式。
+    const pal = this.phase >= 3
+      ? { ring: 'rgba(255, 74, 210, 0.62)', glow: '#ff4ad2', a: '#ffffff', b: '#e03aa8', c: '#5c0a55' }
+      : this.phase === 2
+        ? { ring: 'rgba(255, 161, 74, 0.58)', glow: '#ffa14a', a: '#ffd9ac', b: '#d0691a', c: '#5c2a06' }
+        : { ring: 'rgba(255, 107, 138, 0.55)', glow: '#ff6b8a', a: '#ff9db2', b: '#c02a52', c: '#5c0c22' };
+    const pulse = 1 + Math.sin(this.spin * 3) * 0.04;
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    // ---- 阶段切换爆闪：一圈迅速扩散的白环 ----
+    // 阶段变化是 BOSS 战里最重要的信息，但很容易被弹幕淹没，
+    // 所以额外给一个"整屏都能看到"的信号（Game 那边还会同时震屏 + 播横幅）。
+    if (this.phaseFlash > 0) {
+      const k = 1 - this.phaseFlash / 0.6;
+      ctx.globalAlpha = (1 - k) * 0.85;
+      ctx.beginPath();
+      ctx.arc(0, 0, R * (1.3 + k * 2.1), 0, TAU);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 6 * (1 - k) + 1;
+      ctx.shadowColor = pal.glow;
+      ctx.shadowBlur = 30;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.shadowBlur = 0;
+    }
+
+    // ---- 外层能量护罩：大半径虚线感圆环（用多段短弧拼成）----
+    // 三阶段的护罩转得更快、段数更密 —— 视觉上"它在加速"
+    ctx.save();
+    ctx.rotate(-this.spin * (this.phase >= 3 ? 1.9 : this.phase === 2 ? 1.3 : 0.7));
+    ctx.strokeStyle = flash ? '#ffffff' : pal.ring;
+    ctx.lineWidth = 3;
+    ctx.shadowColor = pal.glow;
+    ctx.shadowBlur = 18;
+    const dashes = this.phase >= 3 ? 16 : this.phase === 2 ? 13 : 10;
+    for (let i = 0; i < dashes; i++) {
+      const a0 = (TAU / dashes) * i;
+      ctx.beginPath();
+      ctx.arc(0, 0, R * 1.24, a0, a0 + TAU / (dashes * 2));
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // ---- 主体：六边形重装甲 ----
+    ctx.scale(pulse, pulse);
+    const body = ctx.createLinearGradient(0, -R, 0, R);
+    body.addColorStop(0, flash ? '#ffffff' : pal.a);
+    body.addColorStop(0.5, flash ? '#ffffff' : pal.b);
+    body.addColorStop(1, flash ? '#ffffff' : pal.c);
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const a = (Math.PI / 3) * i - Math.PI / 2;
+      const px = Math.cos(a) * R;
+      const py = Math.sin(a) * R;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = body;
+    ctx.shadowColor = pal.glow;
+    ctx.shadowBlur = 24;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // ---- 装甲分片线：三条贯穿的暗线，暗示这是拼装的重装机体 ----
+    ctx.strokeStyle = 'rgba(40, 4, 14, 0.5)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    for (let i = 0; i < 3; i++) {
+      const a = (Math.PI / 3) * i * 2;
+      ctx.moveTo(Math.cos(a) * R * 0.95, Math.sin(a) * R * 0.95);
+      ctx.lineTo(Math.cos(a + Math.PI) * R * 0.95, Math.sin(a + Math.PI) * R * 0.95);
+    }
+    ctx.stroke();
+
+    // ---- 中央"独眼"核：Boss 的视觉焦点，也是最亮的部分 ----
+    ctx.beginPath();
+    ctx.arc(0, 0, R * 0.42, 0, TAU);
+    ctx.fillStyle = '#2a0510';
+    ctx.fill();
+    const core = 0.6 + Math.sin(this.spin * (this.phase >= 3 ? 11 : 5)) * 0.22;
+    ctx.beginPath();
+    ctx.arc(0, 0, R * 0.42 * core, 0, TAU);
+    ctx.fillStyle = '#ffd7e0';
+    ctx.shadowColor = pal.glow;
+    ctx.shadowBlur = 26;
+    ctx.fill();
+
+    // ---- 两侧炮口：让"它为什么会发射子弹"这件事在造型上说得通 ----
+    // 二阶段起炮口点亮：提前告诉玩家"火力变多了"，不用等挨打才知道
+    ctx.shadowBlur = 0;
+    const gunOn = this.phase >= 2;
+    ctx.fillStyle = gunOn ? pal.glow : '#3d0814';
+    if (gunOn) { ctx.shadowColor = pal.glow; ctx.shadowBlur = 14; }
+    ctx.beginPath();
+    ctx.arc(-R * 0.72, R * 0.5, R * 0.14, 0, TAU);
+    ctx.moveTo(R * 0.72 + R * 0.14, R * 0.5);
+    ctx.arc(R * 0.72, R * 0.5, R * 0.14, 0, TAU);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // ---- 环形弹幕指示环：三阶段才出现，对应它已经解锁了环形弹幕 ----
+    if (this.hasRing) {
+      ctx.globalAlpha = 0.5 + Math.sin(this.spin * 4) * 0.25;
+      ctx.beginPath();
+      ctx.arc(0, 0, R * 1.55, 0, TAU);
+      ctx.strokeStyle = pal.glow;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 9]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
+  }
+}
+
+/* ============================================================================
+ * 5. 游戏主体 Game
+ *    —— 状态机（ready / playing / paused / over）+ 实体管理 + 主循环逻辑
+ * ========================================================================== */
+const Game = {
+
+  /* ---------- 运行时状态 ---------- */
+  state: 'ready',    // 'ready' | 'playing' | 'paused' | 'over'
+  score: 0,
+  best: 0,
+  level: 1,
+  elapsed: 0,        // 本局存活时间（秒），同时驱动难度曲线
+  bullets: [],       // 玩家子弹数组
+  enemies: [],       // 敌人数组
+  particles: [],     // 粒子数组
+  stars: [],         // 背景星数组
+  nebulae: [],       // 星云团数组
+  meteors: [],       // 流星数组
+  shockwaves: [],    // 冲击波圆环数组
+  floatTexts: [],    // 飘字数组
+  powerups: [],      // 掉落中的道具数组
+  enemyBullets: [],  // 敌方子弹数组（目前只有 Boss 会发射）
+  spawnTimer: 0,     // 距离下一次生成敌人的剩余时间
+  shakeTime: 0,      // 屏幕震动剩余时间
+  shakeMag: 0,       // 屏幕震动幅度（像素）
+  flash: 0,          // 受击红闪剩余时间
+
+  // ---- 连击系统 ----
+  combo: 0,          // 当前连续击杀数
+  comboTimer: 0,     // 距离断连剩余时间（秒）
+  get comboLevel() {
+    // 倍率等级：0 级 = x1，每 STEP 次击杀升一级，封顶 MAX_LEVEL
+    return Math.min(CFG.COMBO.MAX_LEVEL, Math.floor(this.combo / CFG.COMBO.STEP));
+  },
+  get multiplier() { return this.comboLevel + 1; },
+
+  // ---- Boss ----
+  boss: null,        // 当前 Boss 实例（null = 没有 Boss）
+  bossIndex: 0,      // 已经出现过几个 Boss
+  bossWarn: 0,       // Boss 预警剩余时间（秒）
+
+  // ---- 横幅提示（升级 / 道具拾取）----
+  banner: '',        // 主标题文字
+  bannerSub: '',     // 副标题文字
+  bannerTime: 0,     // 剩余显示时间
+  bannerMax: 1,      // 初始显示时间（用于算淡出比例）
+  bannerColor: '#7fe8ff',
+
+  // ---- 道具拾取提示（HUD 右侧短暂显示）----
+  toast: '',
+  toastTime: 0,
+
+  // ---- 激光命中火花的节流计时器 ----
+  // 见 applyLaserDamage：不节流会让同一位置每秒堆 60 簇粒子
+  laserSparkTimer: 0,
+
+  // ---- 本地排行榜（Top 5）----
+  // 存的是对象数组 [{score, level, elapsed, ts}, ...]，按分数降序。
+  scores: [],
+  lastRank: 0,       // 本局在榜单上的名次（1 起）；0 = 没进榜（用于结算高亮）
+  touchMode: false,  // 是否处于触屏模式（决定要不要显示屏幕按钮、HUD 要不要让位）
+  hudBottomPad: 0,   // 触屏模式下底部 HUD 需要上抬的逻辑像素（由 measureTouchPad 算出）
+
+  /* ==========================================================================
+   * 初始化：只做一次
+   * ========================================================================== */
+  init() {
+    // ---- 画布 ----
+    this.canvas = document.getElementById('game');
+    this.canvas.width = CFG.W;      // 用属性而非 CSS 设定逻辑分辨率
+    this.canvas.height = CFG.H;
+    this.ctx = this.canvas.getContext('2d');
+
+    // ---- 实体 ----
+    this.player = new Player();
+
+    // 星空在初始化时随机铺满整屏（randomY = true），
+    // 否则开场会看到上半屏空着、星星"排队"从顶上落下来的尴尬效果
+    this.stars = [];
+    for (let i = 0; i < CFG.STAR_COUNT; i++) {
+      const s = new Star();
+      s.reset(true);
+      this.stars.push(s);
+    }
+
+    // 星云团：铺一层有色雾在星空下面，把"纯黑 + 白点"变成有色彩层次的深空
+    this.nebulae = [];
+    for (let i = 0; i < CFG.NEBULA_COUNT; i++) {
+      this.nebulae.push(new Nebula(i));
+    }
+    this.meteorTimer = 0;   // 流星生成计时（累积到阈值就放一颗）
+
+    // 背景星云光晕：渐变对象创建成本不低，缓存一份反复使用
+    this.bgGrad = this.ctx.createRadialGradient(
+      CFG.W * 0.5, CFG.H * 0.16, 20,
+      CFG.W * 0.5, CFG.H * 0.16, CFG.W * 0.75
+    );
+    this.bgGrad.addColorStop(0, '#101d3a');
+    this.bgGrad.addColorStop(1, '#02030a');
+
+    // HUD 区域顶部的渐隐暗带：敌人从顶部落下时会穿过分数栏，
+    // 直接压一层由深到透明的遮罩，HUD 文字在任何时候都清晰可读，
+    // 视觉上还像飞船穿出云层，比给文字加描边更自然。
+    this.hudGrad = this.ctx.createLinearGradient(0, 0, 0, 78);
+    this.hudGrad.addColorStop(0, 'rgba(2, 3, 10, 0.94)');
+    this.hudGrad.addColorStop(0.65, 'rgba(2, 3, 10, 0.55)');
+    this.hudGrad.addColorStop(1, 'rgba(2, 3, 10, 0)');
+
+    // 中央横幅的底衬：一条只压暗"横幅所在横带"的软遮罩。
+    // 为什么必须有：横幅虽然画在最上层，但"在上层"并不等于"读得清"——
+    // 字形笔画很细，背后只要有一架亮色敌机、一团爆炸或 BOSS 的能量环，
+    // 对比度立刻塌掉（实测：粉色副标题压在橙色精英敌身上几乎无法辨认）。
+    // 用横向渐隐而不是整块黑色，是为了保住战场的可见度，不至于"一弹横幅就黑屏"。
+    const by = CFG.H * 0.36;                 // 横幅中心线（与 drawBanner 保持一致）
+    this.bannerGrad = this.ctx.createLinearGradient(0, by - 78, 0, by + 76);
+    this.bannerGrad.addColorStop(0,    'rgba(2, 3, 10, 0)');
+    this.bannerGrad.addColorStop(0.34, 'rgba(2, 3, 10, 0.74)');
+    this.bannerGrad.addColorStop(0.64, 'rgba(2, 3, 10, 0.80)');
+    this.bannerGrad.addColorStop(1,    'rgba(2, 3, 10, 0)');
+
+    // 暗角（vignette）：中心透明、四周压暗的径向渐变。
+    // 它是最省力也最有效的"电影感"手段 —— 视线被自然收拢到画面中央的战场，
+    // 边缘的冷清区域被压暗后不再跟主体抢注意力。
+    this.vignette = this.ctx.createRadialGradient(
+      CFG.W / 2, CFG.H / 2, CFG.H * 0.34,
+      CFG.W / 2, CFG.H / 2, CFG.H * 0.92
+    );
+    this.vignette.addColorStop(0, 'rgba(0,0,0,0)');
+    this.vignette.addColorStop(1, 'rgba(0,0,0,' + CFG.FX.VIGNETTE.toFixed(2) + ')');
+
+    // 受击用的红色暗角。跟上面同一套几何，只换颜色 ——
+    // 这样"挨打"的观感是边缘在报警，而不是整块红布糊住战场。
+    this.vignetteHit = this.ctx.createRadialGradient(
+      CFG.W / 2, CFG.H / 2, CFG.H * 0.2,
+      CFG.W / 2, CFG.H / 2, CFG.H * 0.86
+    );
+    this.vignetteHit.addColorStop(0, 'rgba(255,40,80,0)');
+    this.vignetteHit.addColorStop(1, 'rgba(255,40,80,' + CFG.FX.HIT_VIGNETTE.toFixed(2) + ')');
+
+    // ---- DOM 引用 ----
+    this.overlay = document.getElementById('overlay');
+    this.ovTitle = document.getElementById('ov-title');
+    this.ovSub = document.getElementById('ov-sub');
+    this.ovStats = document.getElementById('ov-stats');
+    this.ovBtn = document.getElementById('ov-btn');
+    this.ovBoard = document.getElementById('ov-board');
+    this.wrap = document.getElementById('game-wrap');
+    this.touchDash = document.getElementById('touch-dash');
+    this.touchWeapon = document.getElementById('touch-weapon');
+    this.touchDashText = document.getElementById('touch-dash-text');
+    this.touchWeaponText = document.getElementById('touch-weapon-text');
+
+    // 按钮点击：先 blur() 再处理。
+    // 为什么必须 blur：按钮被点击后会获得焦点，之后按空格浏览器会
+    // 把它当成"点击游戏按钮"，导致空格既射击又重开游戏，行为完全错乱。
+    this.ovBtn.addEventListener('click', () => {
+      this.ovBtn.blur();
+      if (this.state === 'paused') this.resume();
+      else this.start();
+    });
+
+    this.initTouchUI();
+    this.loadBest();
+
+    // ---- 输入 ----
+    // ⚠️ 第二个参数（画布）必须传！
+    //    漏了它，initPointer() 会在 `if (!c) return` 处静默早退 ——
+    //    键盘一切正常，触摸和鼠标却完全没反应，而且不报任何错。
+    //    （verify/selftest.js 场景 H 就是为了钉死这个静默失败。）
+    Input.init((k) => this.handleOneShotKey(k), this.canvas);
+
+    // ---- 复位并进入初始状态 ----
+    this.reset();
+    this.setState('ready');
+
+    // ---- 启动主循环 ----
+    // 用箭头函数包一层保证 this 指向 Game（直接传 Game.loop 会丢 this）
+    const loop = (ts) => this.frame(ts);
+    this._loop = loop;
+    requestAnimationFrame(loop);
+  },
+
+  /* ==========================================================================
+   * 主循环：requestAnimationFrame + deltaTime
+   * ========================================================================== */
+
+  /**
+   * 每一帧的回调。
+   * @param {number} ts requestAnimationFrame 传入的高精度时间戳（毫秒）
+   * @returns {void}
+   */
+  frame(ts) {
+    // 先把下一帧排上，保证即使本帧抛错，循环也不会彻底停死
+    requestAnimationFrame(this._loop);
+
+    // ---- 计算 deltaTime ----
+    if (this._lastTs === undefined) this._lastTs = ts;
+    let dt = (ts - this._lastTs) / 1000;   // 毫秒 → 秒
+    this._lastTs = ts;
+
+    // 兜底：非有限值或负值（时钟回拨）直接归零
+    if (!isFinite(dt) || dt < 0) dt = 0;
+    // 夹紧上限，防止切后台回来后"瞬移穿模"
+    dt = Math.min(dt, CFG.MAX_DT);
+
+    this.update(dt);
+    this.render();
+    // 触屏按钮的冷却显示跟着帧走（内部有变化检测，不会每帧写 DOM）
+    this.syncTouchUI();
+  },
+
+  /* ==========================================================================
+   * 更新（逻辑）
+   * ========================================================================== */
+
+  /**
+   * 每帧逻辑更新。
+   * @param {number} dt 时间步（秒）
+   * @returns {void}
+   */
+  update(dt) {
+    // ---- 1) 背景层：任何状态下都在动，画面不会"死"掉 ----
+    const starScale = this.state === 'playing'
+      ? CFG.STAR_SPEED_ON_PLAY
+      : CFG.STAR_SPEED_IDLE;
+    for (let i = 0; i < this.stars.length; i++) {
+      this.stars[i].update(dt * starScale);
+    }
+    for (let i = 0; i < this.nebulae.length; i++) this.nebulae[i].update(dt);
+
+    // ---- 2) 流星：按"每秒期望次数"折算成固定周期内的概率 ----
+    // 为什么：直接写"每帧 0.5% 概率"会让出现频率随帧率变化（144Hz 下是 60Hz 的 2.4 倍），
+    // 改成 期望速率 × 检查周期 才能让不同刷新率下的观感完全一致。
+    this.meteorTimer -= dt;
+    if (this.meteorTimer <= 0) {
+      const tick = 0.4;   // 检查周期（秒）
+      if (Math.random() < CFG.METEOR.CHANCE_PER_SEC * tick) {
+        this.meteors.push(new Meteor());
+      }
+      this.meteorTimer = tick;
+    }
+
+    // ---- 3) 全局视觉计时器衰减（放在状态判断之前，保证暂停后也能自然收尾）----
+    if (this.shakeTime > 0) this.shakeTime -= dt;
+    if (this.flash > 0) this.flash -= dt;
+    if (this.bannerTime > 0) this.bannerTime -= dt;
+    if (this.toastTime > 0) this.toastTime -= dt;
+    if (this.bossWarn > 0) this.bossWarn -= dt;
+
+    // 特效对象在任何状态下都要推进并回收，否则暂停时残留的冲击波会永远停住
+    this.updateEffects(dt);
+
+    // 非进行中状态：逻辑全部冻结（暂停 = 完全静止），直接返回
+    if (this.state !== 'playing') return;
+
+    // ---- 4) 难度推进 + 升级提示 ----
+    this.elapsed += dt;
+    const lv = 1 + Math.floor(this.elapsed / CFG.DIFFICULTY.SECONDS_PER_LEVEL);
+    const newLevel = Math.min(CFG.DIFFICULTY.MAX_LEVEL, lv);
+    if (newLevel !== this.level) {
+      this.level = newLevel;
+      // 只在没到 Boss 等级时提示 LEVEL；到 Boss 等级时提示交给 Boss 预警，避免两条横幅打架
+      if (!this.isBossLevel(newLevel)) {
+        this.showBanner('LEVEL ' + newLevel, '敌军强度提升', 1.5, '#7fe8ff');
+      }
+    }
+
+    // ---- 5) 连击计时：超时断连 ----
+    if (this.combo > 0) {
+      this.comboTimer -= dt;
+      if (this.comboTimer <= 0) this.breakCombo(false);
+    }
+
+    // ---- 6) 玩家 ----
+    // 屏幕冲刺按钮走"一次性请求"通道：键盘 Shift 在 handleOneShotKey 里直接触发，
+    // 指针这边则在这里被消费一次。放在 player.update 之前是有意的 ——
+    // dash() 要用"当前"的拖动方向决定冲向哪边，晚一帧就会朝反方向冲出去。
+    if (Input.consumeDash() && this.player.dash(Input)) this.onDash();
+
+    this.player.update(dt, Input);
+
+    // 按住空格连发：冷却由 Player 内部管理，冷却未结束时返回空数组。
+    // Player.shoot() 返回的是"本次发射的所有子弹"，散射道具因此不需要
+    // Game 知道任何细节 —— 拿到什么就往数组里塞什么。
+    if (Input.shoot) {
+      const shots = this.player.shoot();
+      for (let i = 0; i < shots.length; i++) this.bullets.push(shots[i]);
+    }
+
+    // ---- 6b) 激光：唯一不产生实体子弹的武器 ----
+    // 它的伤害是"每帧按 DPS×dt 结算"，所以必须单独走一条通道，
+    // 不能混进子弹数组（那样会在 60Hz 下每帧生成一颗子弹，既浪费又会把
+    // 碰撞检测的复杂度从 O(敌×弹) 拉成 O(敌×60帧)）。
+    if (this.player.usingLaser && Input.shoot) this.applyLaserDamage(dt);
+
+    // ---- 7) 引擎尾迹粒子 ----
+    // 用节流而不是每帧发射：60 帧全发会让粒子池迅速塞满，
+    // 既浪费预算又让尾迹糊成一条实心带子，反而不好看。
+    if (this.player.engineTimer <= 0) {
+      this.player.engineTimer = this.player.isDashing ? 0.012 : 0.028;
+      this.spawnEngineTrail();
+    }
+
+    // ---- 8) 敌人生成 + Boss 调度 ----
+    this.updateBoss(dt);
+    this.updateSpawning(dt);
+
+    // ---- 9) 更新所有实体 ----
+    for (let i = 0; i < this.enemies.length; i++)     this.enemies[i].update(dt);
+    for (let i = 0; i < this.bullets.length; i++)     this.bullets[i].update(dt);
+    for (let i = 0; i < this.particles.length; i++)   this.particles[i].update(dt);
+    for (let i = 0; i < this.powerups.length; i++)    this.powerups[i].update(dt);
+    for (let i = 0; i < this.enemyBullets.length; i++) this.enemyBullets[i].update(dt);
+    if (this.boss) this.boss.update(dt);
+
+    // ---- 10) 碰撞判定 + 道具拾取 + 回收 ----
+    this.handleCollisions();
+    this.handlePowerups(dt);
+    this.cleanup();
+
+    // ---- 11) 实时刷新最高分（不必等结束，HUD 上能实时看到破纪录）----
+    if (this.score > this.best) this.best = this.score;
+  },
+
+  /**
+   * 推进并回收所有"纯特效"对象。
+   * @param {number} dt 时间步（秒）
+   * @returns {void}
+   * 单独抽出来的原因：这些对象在暂停/结束界面也要继续演完，
+   * 如果塞在 `if (state !== 'playing') return` 之后，暂停时爆炸会僵在半空。
+   */
+  updateEffects(dt) {
+    for (let i = this.meteors.length - 1; i >= 0; i--) {
+      this.meteors[i].update(dt);
+      if (this.meteors[i].dead) this.meteors.splice(i, 1);
+    }
+    for (let i = this.shockwaves.length - 1; i >= 0; i--) {
+      this.shockwaves[i].update(dt);
+      if (this.shockwaves[i].dead) this.shockwaves.splice(i, 1);
+    }
+    for (let i = this.floatTexts.length - 1; i >= 0; i--) {
+      this.floatTexts[i].update(dt);
+      if (this.floatTexts[i].dead) this.floatTexts.splice(i, 1);
+    }
+  },
+
+  /**
+   * 判断某个等级是否属于"Boss 等级"。
+   * @param {number} lv 等级
+   * @returns {boolean}
+   */
+  isBossLevel(lv) {
+    return lv > 0 && lv % CFG.BOSS.EVERY_LEVELS === 0;
+  },
+
+  /**
+   * 在飞船尾部生成尾迹粒子。
+   * @returns {void}
+   */
+  spawnEngineTrail() {
+    const p = this.player;
+    if (this.particles.length > CFG.PARTICLE.MAX) return;
+
+    // 尾迹速度方向 = 飞船运动的反方向 + 一点随机散射。
+    // 纯反方向会拉成一条笔直的线，掺入随机后才有"气流被搅动"的松软感。
+    const d = randDir();
+    const sp = rand(30, 110) * (p.isDashing ? 1.8 : 1);
+    const color = p.isDashing ? '#ffffff' : pick(['#7fe8ff', '#4fd1ff', '#a9e8ff']);
+    this.particles.push(new Particle(
+      p.x + rand(-3, 3),
+      p.y + p.r * 0.62,
+      d.x * sp,
+      d.y * sp + 90,                     // 整体有个向下的初速，模拟被推力甩出
+      rand(0.16, 0.4),
+      color,
+      rand(1.0, 2.4)
+    ));
+  },
+
+  /**
+   * Boss 调度：到 Boss 等级就召唤、Boss 存活时接管开火。
+   * @param {number} dt 时间步（秒）
+   * @returns {void}
+   */
+  updateBoss(dt) {
+    const B = CFG.BOSS;
+
+    // ---- 召唤 ----
+    // 条件写成"该出现的 Boss 序号 × 间隔 ≤ 当前等级"，这样即使帧率抖动
+    // 导致等级一次跳了 2 级，也不会漏掉 Boss，更不会重复召唤。
+    const due = (this.bossIndex + 1) * B.EVERY_LEVELS;
+    if (!this.boss && this.level >= due) {
+      this.bossIndex++;
+      this.boss = new Boss(this.bossIndex);
+      this.bossWarn = 2.2;
+      this.showBanner('战 备 警 报', 'BOSS 已进入战区', 2.2, '#ff6b8a');
+      this.addShake(0.5, 8);
+      return;
+    }
+
+    if (!this.boss) return;
+
+    // ---- 阶段推进 ----
+    // 每帧同步一次：血量在 handleCollisions 里被扣，所以这里最多滞后一帧（16ms），
+    // 玩家不可能察觉。反过来如果放在扣血处同步，激光那种"每帧多次结算"的路径
+    // 就得重复调用，反而容易漏。
+    const nextPhase = this.boss.syncPhase();
+    if (nextPhase !== null) this.onBossPhase(nextPhase);
+
+    // ---- 开火 ----
+    if (this.boss.wantsToFire) {
+      this.boss.resetFire();
+      this.bossFire();
+    }
+  },
+
+  /**
+   * Boss 进入新阶段时的表现层反馈。
+   * @param {number} phase 刚进入的阶段（2 或 3）
+   * @returns {void}
+   * 为什么表现层要和 syncPhase() 分开：
+   *   Boss 类只该知道自己"变了"，不该知道"要播哪条横幅、震多久屏"——
+   *   那是 Game 的职责。分开放也让自检能单独断言 syncPhase 的返回值。
+   */
+  onBossPhase(phase) {
+    const b = this.boss;
+    if (!b) return;
+
+    const isRage = phase >= 3;
+    this.showBanner(
+      isRage ? '狂 暴 化' : 'B O S S  强 化',
+      isRage ? '环形弹幕 · 火力全开' : '装甲解锁 · 火力提升',
+      1.6,
+      isRage ? '#ff4ad2' : '#ffa14a'
+    );
+
+    this.addShake(0.35, isRage ? 13 : 9);
+    this.shockwaves.push(new Shockwave(b.x, b.y, isRage ? 320 : 230,
+                                       isRage ? '#ff4ad2' : '#ffa14a', 0.6));
+    this.explode(b.x, b.y, isRage ? '#ff4ad2' : '#ffa14a', isRage ? 40 : 26, 1.2);
+    this.flash = isRage ? 0.28 : 0.16;
+
+    // ---- 阶段切换时清空场上敌弹 ----
+    // 这是个刻意的"让一口气"设计：玩家刚把血量打进下一个阈值，
+    // 此时屏幕上往往已经积了一屏弹幕，如果紧接着又叠上更密的新弹，
+    // 死亡会显得是运气而不是操作。清屏把阶段切换变成一个"喘息的节拍"，
+    // 玩家能明确感受到"我打赢了一小局，现在开始下一局"。
+    this.enemyBullets.length = 0;
+    this.floatTexts.push(new FloatText(b.x, b.y - b.r - 18, '敌弹清除', '#ffffff', 16, 0.9));
+  },
+
+  /**
+   * Boss 开火。弹幕形态完全由当前阶段决定：
+   *   一阶段 —— 单发瞄准弹（教学：让你看懂"它只会瞄你现在的位"）
+   *   二阶段 —— 三发扇形（同一套躲避方式，但容错窗口收窄）
+   *   三阶段 —— 五发扇形 + 一圈环形弹（新的躲避规则：不能只横着走）
+   * @returns {void}
+   */
+  bossFire() {
+    const b = this.boss;
+    const p = this.player;
+    const sp = CFG.BOSS.BULLET_SPEED;
+    const color = b.phase >= 3 ? '#ff4ad2' : (b.phase === 2 ? '#ffa14a' : '#ff6b8a');
+    const ox = b.x;
+    const oy = b.y + b.r * 0.5;
+
+    // ---- 瞄准基准角 ----
+    // 瞄准玩家"当前"位置（不是预判位置）。
+    // 刻意不做提前量：预判弹在慢速下会变成"怎么躲都被打中"，
+    // 而瞄当前位置的弹，玩家只要一直移动就自然躲开了 —— 规则的公平性比难度更重要。
+    const aim = Math.atan2(p.y - b.y, p.x - b.x);
+    const n = b.spreadCount;
+
+    // ---- 扇形/单发 ----
+    for (let i = 0; i < n; i++) {
+      // 让弹幕以 aim 为中心左右对称展开：n=1 时 k=0（正对玩家），
+      // n=3 时 k = -1,0,1，n=5 时 k = -2,-1,0,1,2。
+      // 用 (i - (n-1)/2) 而不是"从 aim 开始累加"，中心那一发永远正对玩家，
+      // 玩家因此有一个稳定的"最危险的那一发"可以优先处理。
+      const k = i - (n - 1) / 2;
+      const a = aim + k * CFG.BOSS.SPREAD_ANGLE;
+      this.enemyBullets.push(new EnemyBullet(
+        ox, oy, Math.cos(a) * sp, Math.sin(a) * sp, color
+      ));
+    }
+
+    // ---- 环形弹幕（仅三阶段）----
+    // 环形的意义不是"多打几下"，而是"封锁横向走位"：
+    // 只靠左右横移躲扇形弹的玩家到这里必须学会"卡缝隙穿过去"。
+    if (b.hasRing) {
+      const R = CFG.BOSS.RING_3;
+      const rs = CFG.BOSS.RING_SPEED_3;
+      // 用自转相位当起始角：每一轮的缝隙位置都不同，防止被玩家背板
+      const off = b.spin * 1.7;
+      for (let i = 0; i < R; i++) {
+        const a = off + (TAU / R) * i;
+        this.enemyBullets.push(new EnemyBullet(
+          ox, oy, Math.cos(a) * rs, Math.sin(a) * rs, '#ff9de4'
+        ));
+      }
+    }
+  },
+
+  /**
+   * 激光的每帧伤害结算。
+   * @param {number} dt 时间步（秒）
+   * @returns {void}
+   * 和子弹通道的三个区别：
+   *   ① 伤害按 DPS×dt 算，帧率无关；
+   *   ② 不消耗自己 —— 光束一直在，每帧都能打；
+   *   ③ 同时命中整条光柱上的所有目标（穿透），这是激光唯一的、也是核心的优势。
+   */
+  applyLaserDamage(dt) {
+    const p = this.player;
+    const beam = p.laserBeam;
+    const dmg = p.laserDamage(dt);
+    let hitAny = false;
+
+    // ---- 敌人（倒序遍历，命中即结算）----
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      const e = this.enemies[i];
+      if (!aabbOverlap(beam, e.box)) continue;
+      hitAny = true;
+      if (e.hit(dmg)) {
+        this.enemies.splice(i, 1);
+        this.killEnemy(e);
+      }
+    }
+
+    // ---- BOSS ----
+    if (this.boss && aabbOverlap(beam, this.boss.box)) {
+      hitAny = true;
+      if (this.boss.hit(dmg)) this.killBoss();
+    }
+
+    // ---- 命中火花（节流到每 60ms 一簇）----
+    // 不节流的话 60FPS 下每秒会在同一位置堆 60 簇粒子，
+    // 既看不清"打中了"的闪烁感，又会把粒子池瞬间吃满。
+    this.laserSparkTimer -= dt;
+    if (hitAny && this.laserSparkTimer <= 0) {
+      this.laserSparkTimer = 0.06;
+      this.spark(p.x + rand(-4, 4), p.y - p.r - CFG.LASER_LEN * 0.55, '#c9b6ff', 5);
+    }
+  },
+
+  /**
+   * 敌人生成：按"随机间隔"投放，间隔随等级缩短。
+   * @param {number} dt 时间步（秒）
+   * @returns {void}
+   */
+  updateSpawning(dt) {
+    const E = CFG.ENEMY;
+
+    this.spawnTimer -= dt;
+    if (this.spawnTimer > 0) return;
+
+    // ---- 生成一个敌人：它的速度、血量、精英概率都在构造里按当前等级算好 ----
+    this.enemies.push(new Enemy(this.level));
+
+    // ---- 计算下一次生成的间隔 ----
+    // 基础间隔随等级线性缩短，并受 MIN_INTERVAL 兜底（否则后期会密到不可玩）
+    let base = Math.max(
+      E.MIN_INTERVAL,
+      E.BASE_INTERVAL - (this.level - 1) * E.INTERVAL_PER_LEVEL
+    );
+
+    // Boss 在场时把小怪节奏拉长一倍多：
+    // 否则"躲 Boss 弹幕"和"清杂兵"两件事会互相挤占玩家的注意力，
+    // Boss 战就退化成一片混乱，玩家只会觉得是设计失误而不是难度。
+    if (this.boss) base *= 2.2;
+
+    // 再叠加 ±INTERVAL_JITTER 的随机浮动。
+    // 纯粹的固定间隔会让玩家立刻背出节奏，随机化之后每一波都要即兴反应。
+    this.spawnTimer = base * rand(1 - E.INTERVAL_JITTER, 1 + E.INTERVAL_JITTER);
+  },
+
+  /* ==========================================================================
+   * 碰撞检测
+   * ========================================================================== */
+
+  /**
+   * 统一处理三类碰撞：子弹×敌人、玩家×敌人、敌人越界。
+   * 全部使用"倒序遍历 + 立即 splice"：
+   * 倒着走时，删除当前元素只会影响它后面的索引，
+   * 而后面那些都已经访问过了，所以既不会漏项也不会越界。
+   * @returns {void}
+   */
+  handleCollisions() {
+    const p = this.player;
+
+    // ---------- 1) 子弹 × 敌人（AABB）----------
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      const e = this.enemies[i];
+      const eb = e.box;   // 本帧敌人位置不变，包围盒算一次就够
+
+      for (let j = this.bullets.length - 1; j >= 0; j--) {
+        const b = this.bullets[j];
+        if (!aabbOverlap(b.box, eb)) continue;
+
+        const dmg = b.damage;
+        this.bullets.splice(j, 1);   // 命中即消耗，一颗子弹只结算一次
+
+        if (e.hit(dmg)) {
+          this.enemies.splice(i, 1);
+          this.killEnemy(e);
+          break;   // 敌人已被移除，没必要再用剩下的子弹去检测它
+        }
+        // 未击毁（精英敌）：继续用后面的子弹检测同一个敌人，
+        // 一帧内多发的子弹可以同时结算，打击感更干脆。
+        // 同时给一簇小火花，让"打中了但没打死"和"打空了"在视觉上能区分。
+        this.spark(b.x, b.y - 6, '#ffd7e0', 3);
+      }
+    }
+
+    // ---------- 2) 子弹 × Boss ----------
+    if (this.boss) {
+      const boss = this.boss;
+      const bb = boss.box;
+      for (let j = this.bullets.length - 1; j >= 0; j--) {
+        const b = this.bullets[j];
+        if (!aabbOverlap(b.box, bb)) continue;
+        this.bullets.splice(j, 1);
+        this.spark(b.x, b.y, '#ffd7e0', 4);
+        if (boss.hit(b.damage)) {
+          this.killBoss();
+          break;
+        }
+      }
+    }
+
+    // ---------- 3) 玩家 × 敌人（圆形）----------
+    // 完全免疫期间直接跳过整段检测：这是"一次接触只扣一命"的主要保障。
+    // 判定用 isProtected 而不是 isInvincible：护盾必须走完碰撞流程才会被消耗，
+    // 用错就会得到一个"永远打不破的护盾"，等于永久无敌。
+    if (!p.isProtected) {
+      for (let i = this.enemies.length - 1; i >= 0; i--) {
+        const e = this.enemies[i];
+        if (!circleOverlap(p, e.circle)) continue;
+
+        this.enemies.splice(i, 1);
+        this.explode(e.x, e.y, '#7fd8ff', CFG.PARTICLE.EXPLOSION_COUNT, 1.2);
+        this.damagePlayer();
+        break;   // 一帧只扣一次命；剩下的交给无敌时间处理
+      }
+    }
+
+    // ---------- 4) 玩家 × Boss（圆形）----------
+    // Boss 撞到玩家不会消失 —— 它是关底目标，撞一下只扣命。
+    // 注意这里没有扣完命就 break 的问题：Boss 只有一个。
+    if (this.boss && !p.isProtected && circleOverlap(p, this.boss.circle)) {
+      this.damagePlayer();
+    }
+
+    // ---------- 5) 玩家 × 敌方子弹（圆形）----------
+    if (!p.isProtected) {
+      for (let i = this.enemyBullets.length - 1; i >= 0; i--) {
+        const eb = this.enemyBullets[i];
+        if (!circleOverlap(p, eb.circle)) continue;
+        this.enemyBullets.splice(i, 1);
+        this.spark(p.x, p.y - p.r * 0.5, eb.color, 12);
+        this.damagePlayer();
+        break;
+      }
+    }
+
+    // ---------- 6) 敌人越过底部 ----------
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      const e = this.enemies[i];
+      if (!e.pastBottom) continue;
+
+      // 漏怪要付出代价，否则玩家可以一直躲着不打。
+      // 同时断连：这是连击系统里最重要的负反馈 ——
+      // 让"漏掉一个"的心理成本远大于它本身扣的那点血。
+      this.enemies.splice(i, 1);
+      this.breakCombo(true);
+      this.damagePlayer();
+    }
+  },
+
+  /**
+   * 拾取判定 + 道具磁吸。
+   * @param {number} dt 时间步（秒）
+   * @returns {void}
+   * 单独成一个方法并接收 dt（而不是并进 handleCollisions），
+   * 是因为磁吸是个"逐帧加速"的过程，必须有时间步参与；碰撞检测本身则不需要。
+   */
+  handlePowerups(dt) {
+    const p = this.player;
+    const P = CFG.POWERUP;
+
+    for (let i = this.powerups.length - 1; i >= 0; i--) {
+      const u = this.powerups[i];
+
+      // ---- 磁吸 ----
+      // 没有磁吸的话，玩家会频繁经历"差几像素没接到"。
+      // 那是纯粹的操作挫败，而不是难度，所以用一个随距离增强的引力来兜住。
+      const dx = p.x - u.x;
+      const dy = p.y - u.y;
+      const d = Math.hypot(dx, dy);
+      if (d > 0.001 && d < P.MAGNET_RADIUS) {
+        const pull = (1 - d / P.MAGNET_RADIUS) * 900;
+        u.x += (dx / d) * pull * dt;
+        u.y += (dy / d) * pull * dt;
+      }
+
+      if (circleOverlap(p, u.circle)) {
+        this.powerups.splice(i, 1);
+        this.applyPowerUp(u.type);
+        continue;
+      }
+      if (u.dead) this.powerups.splice(i, 1);
+    }
+  },
+
+  /**
+   * 结算一次敌人击毁：加分、连击、爆炸、飘字、掉落。
+   * @param {Enemy} e 被击毁的敌人
+   * @returns {void}
+   */
+  killEnemy(e) {
+    const E = CFG.ENEMY;
+    const base = e.elite ? E.SCORE_ELITE : E.SCORE_NORMAL;
+    // 得分 = 基础分 × 连击倍率。倍率只在击杀这一处生效，
+    // 保证玩家看到的每一个数字都能手算出来，不需要猜规则。
+    const gained = base * this.multiplier;
+    this.score += gained;
+
+    this.addKill();
+    this.explode(e.x, e.y,
+      e.elite ? '#ffb457' : '#ff5d7a',
+      e.elite ? CFG.PARTICLE.EXPLOSION_COUNT * 1.8 : CFG.PARTICLE.EXPLOSION_COUNT,
+      e.elite ? 1.3 : 1);
+    this.floatTexts.push(new FloatText(
+      e.x, e.y - e.r * 0.4, '+' + gained,
+      e.elite ? '#ffd479' : '#ffd7e0',
+      e.elite ? 19 : 15, 0.75
+    ));
+    this.addShake(CFG.SHAKE_ON_KILL, CFG.SHAKE_ON_KILL_MAG);
+    this.maybeDrop(e);
+  },
+
+  /**
+   * 结算 Boss 击破：高额分数 + 三段式爆炸 + 必掉道具。
+   * @returns {void}
+   */
+  killBoss() {
+    const b = this.boss;
+    if (!b) return;
+
+    const gained = b.score * this.multiplier;
+    this.score += gained;
+
+    // 三段式爆炸：核心闪光 + 两圈不同颜色的粒子，再加两层冲击波。
+    // 关底必须有超出普通击杀的"仪式感"，否则辛苦打半天和打小怪没有区别。
+    this.explode(b.x, b.y, '#ff6b8a', 60, 1.9);
+    this.explode(b.x, b.y, '#ffd479', 28, 1.3);
+    this.shockwaves.push(new Shockwave(b.x, b.y, 300, '#ff9db2', 0.75));
+    this.shockwaves.push(new Shockwave(b.x, b.y, 190, '#ffd479', 0.5));
+    this.addShake(CFG.SHAKE_ON_BOMB, CFG.SHAKE_ON_BOMB_MAG + 6);
+    this.flash = 0.4;
+
+    this.floatTexts.push(new FloatText(b.x, b.y, 'BOSS 击破 +' + gained, '#ffd479', 22, 1.6));
+
+    // 击破奖励：直接掉 3 个道具（不参与概率判定）。
+    // 高难度战斗后立刻补给，玩家才有动力继续往上打，而不是"打赢了反而更虚"。
+    const keys = Object.keys(PowerUp.TYPES);
+    for (let i = 0; i < 3; i++) {
+      const type = keys[Math.floor(Math.random() * keys.length) % keys.length];
+      this.powerups.push(new PowerUp(type, b.x + (i - 1) * 46, b.y));
+    }
+
+    this.boss = null;
+    this.showBanner('B O S S  击 破', '继续前进', 1.8, '#ffd479');
+  },
+
+  /**
+   * 按概率掉落道具。
+   * @param {Enemy} e 被击毁的敌人
+   * @returns {void}
+   */
+  maybeDrop(e) {
+    const P = CFG.POWERUP;
+    const chance = P.DROP_CHANCE + (e.elite ? P.ELITE_BONUS : 0);
+    if (Math.random() >= chance) return;
+
+    // ---- 过滤掉已经解锁的武器 ----
+    // 不这么做的话，后期每次掉武器都等于"白白浪费一次道具机会"，
+    // 玩家会觉得捡到的是垃圾 —— 奖励必须始终是奖励。
+    const w = {};
+    const keys = Object.keys(PowerUp.TYPES);
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      const def = PowerUp.TYPES[k];
+      if (def.weapon && this.player.weapons.includes(def.weapon)) continue;
+      w[k] = def.weight;
+    }
+
+    this.powerups.push(new PowerUp(weightedPick(w), e.x, e.y));
+  },
+
+  /**
+   * 生效一个道具效果。
+   * @param {string} type 道具类型键
+   * @returns {void}
+   */
+  applyPowerUp(type) {
+    const p = this.player;
+    const P = CFG.POWERUP;
+    const def = PowerUp.TYPES[type];
+
+    if (type === 'shield') {
+      // 用 max 而不是直接赋值：连续吃到两个护盾应该叠加时长，而不是互相覆盖
+      p.shieldTime = Math.max(p.shieldTime, P.SHIELD_TIME);
+    } else if (type === 'spread') {
+      p.spreadTime = Math.max(p.spreadTime, P.SPREAD_TIME);
+    } else if (type === 'rapid') {
+      p.rapidTime = Math.max(p.rapidTime, P.RAPID_TIME);
+    } else if (type === 'life') {
+      // 生命封顶：不然一路吃到 20 条命，游戏后半段就彻底没有紧张感了
+      p.lives = Math.min(CFG.PLAYER.MAX_LIVES, p.lives + 1);
+    } else if (type === 'bomb') {
+      this.detonateBomb();
+    } else if (def.weapon) {
+      // 武器解锁道具：解锁的同时自动装备（见 Player.unlockWeapon 的注释）
+      p.unlockWeapon(def.weapon);
+    }
+
+    this.toast = def.toast;
+    this.toastTime = 1.8;
+    this.floatTexts.push(new FloatText(p.x, p.y - 40, def.toast, def.color, 16, 1.0));
+    // 武器解锁给更大的冲击波，因为它是"改变玩法"级别的事件，不该和护盾同一个分量
+    this.shockwaves.push(new Shockwave(p.x, p.y, def.weapon ? 150 : 90, def.color, def.weapon ? 0.55 : 0.4));
+    if (def.weapon) this.addShake(0.3, 7);
+  },
+
+  /**
+   * 炸弹引爆：清掉场上所有小怪与敌方子弹，Boss 只吃固定伤害。
+   * @returns {void}
+   */
+  detonateBomb() {
+    // 炸弹的定位是"翻盘"，不是"刷分"。所以清屏得分按半价结算，
+    // 让主动击杀始终比炸掉更划算，避免玩家把炸弹当刷分工具。
+    let gained = 0;
+    let n = 0;
+    for (let i = 0; i < this.enemies.length; i++) {
+      const e = this.enemies[i];
+      gained += Math.round(
+        (e.elite ? CFG.ENEMY.SCORE_ELITE : CFG.ENEMY.SCORE_NORMAL) * 0.5
+      );
+      this.explode(e.x, e.y, e.elite ? '#ffb457' : '#ff5d7a', 12, 1.1);
+      n++;
+    }
+    this.enemies.length = 0;
+
+    // Boss 只受伤不秒杀：否则一颗道具就能跳过关底战，整个 Boss 设计就白做了
+    if (this.boss && this.boss.hit(8)) this.killBoss();
+
+    // 连带清掉敌方子弹 —— 这才是"解围"的关键，只清小怪的话弹幕还在，等于没救
+    for (let i = 0; i < this.enemyBullets.length; i++) {
+      this.spark(this.enemyBullets[i].x, this.enemyBullets[i].y, '#ff6b8a', 6);
+    }
+    this.enemyBullets.length = 0;
+
+    const total = gained * this.multiplier;
+    this.score += total;
+
+    if (n > 0) {
+      this.floatTexts.push(new FloatText(
+        CFG.W / 2, CFG.H * 0.42, '清屏 +' + total, '#ff9db2', 22, 1.2
+      ));
+    }
+
+    // 一整屏的冲击波 + 强震动：炸弹必须有"整个画面都被掀了一下"的量感
+    this.shockwaves.push(new Shockwave(CFG.W / 2, CFG.H * 0.5, CFG.W * 0.72, '#ff9db2', 0.55));
+    this.addShake(CFG.SHAKE_ON_BOMB, CFG.SHAKE_ON_BOMB_MAG);
+    this.flash = 0.3;
+  },
+
+  /**
+   * 记一次连击。
+   * @returns {void}
+   */
+  addKill() {
+    const before = this.comboLevel;
+    this.combo++;
+    this.comboTimer = CFG.COMBO.WINDOW;
+
+    // 倍率升级的瞬间给一次明确的正反馈，玩家才会意识到"连击是有价值的"
+    if (this.comboLevel > before) {
+      this.floatTexts.push(new FloatText(
+        this.player.x, this.player.y - 52,
+        '连击 x' + this.multiplier, '#ffd479', 20, 1.2
+      ));
+      this.shockwaves.push(new Shockwave(
+        this.player.x, this.player.y, 70, '#ffd479', 0.35
+      ));
+    }
+  },
+
+  /**
+   * 断连。
+   * @param {boolean} showTip 是否显示"连击中断"提示
+   * @returns {void}
+   */
+  breakCombo(showTip) {
+    if (this.combo === 0) return;
+    const had = this.multiplier;
+    this.combo = 0;
+    this.comboTimer = 0;
+    // 只在倍率真的高于 x1 时才提示：1 连断掉也弹字会变得很吵
+    if (showTip && had > 1) {
+      this.floatTexts.push(new FloatText(
+        this.player.x, this.player.y - 48, '连击中断', '#ff7a90', 16, 0.9
+      ));
+    }
+  },
+
+  /**
+   * 显示一条画面中央的横幅。
+   * @param {string} title 主标题
+   * @param {string} sub   副标题（可为空）
+   * @param {number} time  显示时长（秒）
+   * @param {string} color 主色
+   * @returns {void}
+   */
+  showBanner(title, sub, time, color) {
+    this.banner = title;
+    this.bannerSub = sub || '';
+    this.bannerTime = time;
+    this.bannerMax = time;
+    this.bannerColor = color || '#7fe8ff';
+  },
+
+  /**
+   * 扣除玩家生命并触发受击反馈。
+   * @returns {void}
+   */
+  damagePlayer() {
+    const p = this.player;
+    // 双保险：调用方已判断过一次，这里再挡一次。
+    // 同样只挡 isProtected —— 护盾要留到下面单独处理。
+    if (p.isProtected) return;
+
+    // ---- 护盾优先破盾 ----
+    // 把一次致命伤转化成"护盾碎裂"，护盾的价值就变得非常直观（挡一次），
+    // 而不是一个模糊的"减伤百分之多少"。玩家能明确知道自己刚刚躲过了什么。
+    if (p.shieldTime > 0) {
+      p.shieldTime = 0;
+      this.shockwaves.push(new Shockwave(p.x, p.y, 130, '#7fe8ff', 0.45));
+      this.spark(p.x, p.y, '#7fe8ff', 22);
+      this.floatTexts.push(new FloatText(p.x, p.y - 34, '护盾碎裂', '#7fe8ff', 16, 0.9));
+      p.invincible = 0.9;   // 破盾后给一小段无敌，避免"盾碎的同一瞬间被第二下打死"
+      this.addShake(CFG.SHAKE_ON_HIT, CFG.SHAKE_ON_HIT_MAG * 0.6);
+      this.breakCombo(true);
+      return;
+    }
+
+    p.lives -= 1;
+    p.invincible = CFG.PLAYER.INVINCIBLE;   // 进入无敌，避免子弹时间里被连续碰撞
+    this.flash = 0.35;                       // 屏幕泛红
+    this.addShake(CFG.SHAKE_ON_HIT, CFG.SHAKE_ON_HIT_MAG);   // 屏幕震动
+    this.spark(p.x, p.y, '#7fd8ff', 20);     // 飞船位置也喷一簇火花
+    this.breakCombo(true);
+
+    if (p.lives <= 0) this.gameOver();
+  },
+
+  /**
+   * 回收所有被标记 dead 的实体。
+   * 语义上"标记 + 统一回收"比"哪里检测到哪里删"更安全：
+   * 检测阶段只负责打标记，回收阶段只负责删除，职责清晰，绝不会在遍历中改数组。
+   * @returns {void}
+   */
+  cleanup() {
+    for (let i = this.bullets.length - 1; i >= 0; i--) {
+      if (this.bullets[i].dead) this.bullets.splice(i, 1);
+    }
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      if (this.particles[i].dead) this.particles.splice(i, 1);
+    }
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      if (this.enemies[i].dead) this.enemies.splice(i, 1);
+    }
+  },
+
+  /* ==========================================================================
+   * 特效
+   * ========================================================================== */
+
+  /**
+   * 在指定位置生成一团爆炸粒子。
+   * @param {number} x      爆炸中心 x
+   * @param {number} y      爆炸中心 y
+   * @param {string} color  主色调
+   * @param {number} count  粒子数量
+   * @param {number} power  速度倍率（越大炸得越开）
+   * @returns {void}
+   */
+  explode(x, y, color, count, power) {
+    const P = CFG.PARTICLE;
+    // 粒子上限保护：超限就放弃这次特效。
+    // 宁可少一点华丽，也不要在敌人密集时因为几千个粒子而掉帧。
+    if (this.particles.length > P.MAX) return;
+
+    const n = Math.round(count);
+    for (let i = 0; i < n; i++) {
+      const d = randDir();
+      const sp = rand(P.SPEED_MIN, P.SPEED_MAX) * (power || 1);
+      const life = rand(P.LIFE_MIN, P.LIFE_MAX);
+      // 35% 的粒子用白色：全同色的爆炸会显得很单薄，
+      // 掺一点高光色才有"火花"的层次感
+      const c = Math.random() < 0.35 ? '#ffffff' : color;
+      this.particles.push(
+        new Particle(x, y, d.x * sp, d.y * sp, life, c, rand(1.5, 3.6))
+      );
+    }
+
+    // 每次爆炸都配一圈冲击波，半径随当量（粒子数 / 威力）缩放。
+    // 只加粒子的话画面是"碎屑散开"，加上扩张的圆环才读得出"能量释放"。
+    this.shockwaves.push(new Shockwave(
+      x, y, (26 + n * 1.5) * (power || 1), color, 0.42
+    ));
+  },
+
+  /**
+   * 小簇火花：用于命中反馈（不需要冲击波和震动的轻量粒子）。
+   * @param {number} x     位置 x
+   * @param {number} y     位置 y
+   * @param {string} color 颜色
+   * @param {number} count 粒子数
+   * @returns {void}
+   */
+  spark(x, y, color, count) {
+    if (this.particles.length > CFG.PARTICLE.MAX) return;
+    for (let i = 0; i < count; i++) {
+      const d = randDir();
+      const sp = rand(40, 175);
+      this.particles.push(new Particle(
+        x, y, d.x * sp, d.y * sp, rand(0.1, 0.3), color, rand(1, 2.2)
+      ));
+    }
+  },
+
+  /**
+   * 触发屏幕震动。
+   * @param {number} time     震动持续时间（秒）
+   * @param {number} magnitude 震动幅度（像素）
+   * @returns {void}
+   */
+  addShake(time, magnitude) {
+    // 取较大值而不是直接覆盖：连续受击时震动不会被削弱
+    this.shakeTime = Math.max(this.shakeTime, time);
+    this.shakeMag = Math.max(this.shakeMag, magnitude);
+  },
+
+  /* ==========================================================================
+   * 渲染
+   * ========================================================================== */
+
+  /**
+   * 绘制一帧。
+   * @returns {void}
+   */
+  render() {
+    const ctx = this.ctx;
+    const p = this.player;
+
+    ctx.save();
+
+    // ---- 屏幕震动：整个场景（不含 HUD）随机平移 ----
+    if (this.shakeTime > 0 && this.shakeMag > 0) {
+      // 用 clamp 把衰减比例限在 0~1。炸弹的震动时长(0.6s)比受击(0.45s)更长，
+      // 不夹紧的话比例会超过 1，反而让炸弹的震幅"越衰减越大"，很怪。
+      const k = clamp(this.shakeTime / CFG.SHAKE_ON_HIT, 0, 1);
+      const a = Math.random() * Math.PI * 2;          // 随机方向（比左右晃更"炸"）
+      const m = this.shakeMag * k;
+      ctx.translate(Math.cos(a) * m, Math.sin(a) * m);
+    } else {
+      this.shakeMag = 0;   // 震动结束后清零，避免残留的大幅度值被下一次复用
+    }
+
+    // ---- 背景：多画一圈（±24px），防止震动平移时露出画布底色边 ----
+    const PAD = 24;
+    ctx.fillStyle = '#02030a';
+    ctx.fillRect(-PAD, -PAD, CFG.W + PAD * 2, CFG.H + PAD * 2);
+
+    // 星云光晕（缓存的渐变对象）
+    ctx.fillStyle = this.bgGrad;
+    ctx.fillRect(-PAD, -PAD, CFG.W + PAD * 2, CFG.H + PAD * 2);
+
+    // ---- 星云团：垫在星空下面，给深空一点颜色倾向 ----
+    for (let i = 0; i < this.nebulae.length; i++) this.nebulae[i].draw(ctx);
+    // ---- 星星 ----
+    for (let i = 0; i < this.stars.length; i++) this.stars[i].draw(ctx);
+
+    // ================= 辉光层开始 =================
+    // 从这里到 HUD 之前，全部用 'lighter'（加法混合）绘制。
+    // 为什么值得单独切模式：普通混合下亮色叠亮色只会互相覆盖，
+    // 加法混合下光会真的"叠加变亮"，爆炸中心和弹幕交汇处自然过曝成白色 ——
+    // 这就是"辉光感"最便宜的来源，比真的做高斯模糊快一个数量级。
+    if (CFG.FX.GLOW) ctx.globalCompositeOperation = 'lighter';
+
+    // 流星（背景光迹）
+    for (let i = 0; i < this.meteors.length; i++) this.meteors[i].draw(ctx);
+    // 粒子与冲击波在最底层：它们是"光"，不该盖住实体轮廓
+    for (let i = 0; i < this.particles.length; i++) this.particles[i].draw(ctx);
+    for (let i = 0; i < this.shockwaves.length; i++) this.shockwaves[i].draw(ctx);
+
+    if (CFG.FX.GLOW) ctx.globalCompositeOperation = 'source-over';
+    // ================= 辉光层结束 =================
+
+    // ---- 实体绘制顺序：敌人 → Boss → 道具 → 敌弹 → 玩家子弹 → 玩家 ----
+    // 越靠后越上层。玩家子弹压在所有敌人之上（不会被敌人挡住），
+    // 玩家本体又在最上层（自己的位置永远要看得清）。
+    for (let i = 0; i < this.enemies.length; i++)   this.enemies[i].draw(ctx);
+    if (this.boss) this.boss.draw(ctx);
+    for (let i = 0; i < this.powerups.length; i++)  this.powerups[i].draw(ctx);
+    for (let i = 0; i < this.enemyBullets.length; i++) this.enemyBullets[i].draw(ctx);
+    for (let i = 0; i < this.bullets.length; i++)   this.bullets[i].draw(ctx);
+
+    // ---- 激光光柱：画在实体之后、飞船之前 ----
+    // 顺序是有讲究的：压在敌人上面（否则会被精英敌的机体挡住，看不出在持续输出），
+    // 但压在飞船下面（让机头接住光柱根部，视觉上"从枪口射出"而不是"盖在船上"）。
+    if (this.player.usingLaser && Input.shoot && this.state === 'playing') {
+      this.drawLaser(ctx, p);
+    }
+
+    // ready 状态下把飞船静态地展示出来（当"机体预览"），over 时已被炸毁就不再画
+    if (this.state === 'ready' || this.state === 'playing' || this.state === 'paused') {
+      p.draw(ctx);
+    }
+
+    // ---- 飘字：在实体之上，让得分数字不会被任何东西遮住 ----
+    for (let i = 0; i < this.floatTexts.length; i++) this.floatTexts[i].draw(ctx);
+
+    ctx.restore();   // 结束震动坐标系
+
+    // ==========================================================================
+    // 后处理（不参与震动，固定在屏幕坐标系里）
+    // ==========================================================================
+
+    // ---- 暗角：压暗四周，把注意力收拢到中央战场 ----
+    ctx.fillStyle = this.vignette;
+    ctx.fillRect(0, 0, CFG.W, CFG.H);
+
+    // ---- 受击红暗角：边缘报警，中央保持可读 ----
+    if (this.flash > 0) {
+      const a = clamp(this.flash / 0.35, 0, 1);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = this.vignetteHit;
+      ctx.fillRect(0, 0, CFG.W, CFG.H);
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- 扫描线：极轻的横向细线，给画面一点显像管的质感 ----
+    // 用逐行 fillRect 而不是 createPattern：单文件游戏里不必为了这点效果
+    // 额外建离屏画布，而且 200 次 1px 矩形的开销在实际运行中完全可以忽略。
+    if (CFG.FX.SCANLINE > 0) {
+      ctx.globalAlpha = CFG.FX.SCANLINE;
+      ctx.fillStyle = '#000000';
+      for (let y = 0; y < CFG.H; y += 3) ctx.fillRect(0, y, CFG.W, 1);
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- HUD ----
+    if (this.state !== 'ready') {
+      // 先铺一层顶部渐隐遮罩，避免敌人从分数栏上方穿过时糊住文字
+      ctx.fillStyle = this.hudGrad;
+      ctx.fillRect(0, 0, CFG.W, 78);
+      this.drawHUD(ctx);
+    }
+
+    // ---- 中央横幅（升级 / Boss 预警 / 击破）----
+    if (this.bannerTime > 0) this.drawBanner(ctx);
+  },
+
+  /**
+   * 绘制激光光柱。
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {Player} p 玩家飞船
+   * @returns {void}
+   */
+  drawLaser(ctx, p) {
+    const beam = p.laserBeam;
+    const cx = beam.x + beam.w / 2;
+    const top = beam.y;
+    const bottom = beam.y + beam.h;
+    const t = p.laserOn;
+
+    ctx.save();
+    // 加法混合：光线叠在暗背景上要"越叠越亮"。
+    // 用普通 source-over 会把它压成一根灰白色长条，看着像贴纸而不是光。
+    ctx.globalCompositeOperation = 'lighter';
+
+    // ---- 外层光晕：宽、软、带轻微呼吸 ----
+    const glowW = beam.w * 2.8 * (1 + Math.sin(t * 22) * 0.06);
+    const g = ctx.createLinearGradient(cx - glowW / 2, 0, cx + glowW / 2, 0);
+    g.addColorStop(0,   'rgba(120, 90, 255, 0)');
+    g.addColorStop(0.5, 'rgba(180, 140, 255, 0.40)');
+    g.addColorStop(1,   'rgba(120, 90, 255, 0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(cx - glowW / 2, top, glowW, beam.h);
+
+    // ---- 主干：外紫内白两层矩形 ----
+    ctx.fillStyle = 'rgba(150, 110, 255, 0.85)';
+    ctx.fillRect(cx - beam.w / 2, top, beam.w, beam.h);
+    const coreW = Math.max(2, beam.w * 0.34);
+    ctx.fillStyle = 'rgba(240, 235, 255, 0.95)';
+    ctx.fillRect(cx - coreW / 2, top, coreW, beam.h);
+
+    // ---- 能量脉冲：一串持续向上飞的光斑 ----
+    // 静止的光柱在视觉上就是"一根柱子"，加上流动光斑才有"能量在往上冲"的方向感，
+    // 玩家扫一眼就能确认它活着、在持续输出，而不是一个卡住的贴图。
+    const seg = 46;
+    const head = (t * 620) % seg;
+    for (let y = bottom + seg - head; y > top; y -= seg) {
+      const k = clamp((y - top) / beam.h, 0, 1);
+      ctx.globalAlpha = 0.5 * (1 - k) + 0.12;   // 越靠近枪口越亮
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(cx - coreW / 2 - 1, y - 7, coreW + 2, 14);
+    }
+    ctx.globalAlpha = 1;
+
+    // ---- 枪口爆点：给光柱一个明确的"源" ----
+    ctx.beginPath();
+    ctx.arc(cx, bottom, 9 + Math.sin(t * 30) * 1.6, 0, TAU);
+    ctx.fillStyle = 'rgba(200, 170, 255, 0.9)';
+    ctx.fill();
+
+    ctx.restore();
+  },
+
+  /**
+   * 绘制画面中央的横幅。
+   * @param {CanvasRenderingContext2D} ctx
+   * @returns {void}
+   */
+  drawBanner(ctx) {
+    const t = this.bannerTime / this.bannerMax;   // 1 → 0
+    // 进场 15% 淡入、退场 25% 淡出，中间保持全亮。
+    // 全程线性淡出会让文字在大部分时间里都半透明，读不清也显得没气势。
+    let a = 1;
+    if (t > 0.85) a = (1 - t) / 0.15;
+    else if (t < 0.25) a = t / 0.25;
+    a = clamp(a, 0, 1);
+
+    // 轻微的缩放：1.08 → 1.0，像"推上来"而不是突然出现
+    const scale = 1 + (1 - Math.min(1, (1 - t) / 0.3)) * 0.08;
+
+    ctx.save();
+    ctx.globalAlpha = a;
+
+    // ---- 先铺底衬（必须在 translate 之前画，渐变是按绝对坐标定义的）----
+    ctx.fillStyle = this.bannerGrad;
+    ctx.fillRect(0, CFG.H * 0.36 - 78, CFG.W, 154);
+
+    ctx.translate(CFG.W / 2, CFG.H * 0.36);
+    ctx.scale(scale, scale);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // ---- 主标题：先描深色边，再填充 ----
+    // 描边这一步不能省：阴影只能"发光"，撑不起对比度；
+    // 真正把字形从亮背景里抠出来的是那圈深色轮廓。
+    ctx.font = '700 38px "Segoe UI", "Microsoft YaHei", sans-serif';
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = 5;
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = 'rgba(2, 3, 10, 0.9)';
+    ctx.strokeText(this.banner, 0, 0);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = this.bannerColor;
+    ctx.shadowBlur = 26;
+    ctx.fillText(this.banner, 0, 0);
+
+    if (this.bannerSub) {
+      ctx.font = '600 15px "Segoe UI", "Microsoft YaHei", sans-serif';
+      // 副标题同样先描边：它是"细字 + 彩色"，比主标题更容易被背景吃掉
+      ctx.shadowBlur = 0;
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = 'rgba(2, 3, 10, 0.92)';
+      ctx.strokeText(this.bannerSub, 0, 34);
+
+      ctx.fillStyle = this.bannerColor;
+      ctx.shadowBlur = 12;
+      ctx.fillText(this.bannerSub, 0, 34);
+    }
+    ctx.restore();
+  },
+
+  /**
+   * 绘制 HUD：分数、最高分、等级、连击、道具计时、冲刺冷却、生命、Boss 血条。
+   * @param {CanvasRenderingContext2D} ctx
+   * @returns {void}
+   */
+  drawHUD(ctx) {
+    const p = this.player;
+    ctx.save();
+    ctx.textBaseline = 'top';
+
+    // ---- 左上：分数 + 最高分 ----
+    // ⚠️ 这一行的文本格式必须保持 'SCORE ' + 6 位补零 且独立成一次 fillText：
+    //    自检脚本靠 /^SCORE (\d+)$/ 正则从绘制调用里反解分数，
+    //    一旦把连击倍率拼进同一个字符串，测试就会直接读不到分数。
+    ctx.textAlign = 'left';
+    ctx.font = '600 21px Consolas, "Courier New", monospace';
+    ctx.fillStyle = '#8fe3ff';
+    ctx.shadowColor = 'rgba(79,209,255,.7)';
+    ctx.shadowBlur = 12;
+    ctx.fillText('SCORE ' + String(this.score).padStart(6, '0'), 18, 14);
+    ctx.shadowBlur = 0;
+
+    ctx.font = '12px Consolas, "Courier New", monospace';
+    ctx.fillStyle = '#6f9dc0';
+    ctx.fillText('BEST  ' + String(this.best).padStart(6, '0'), 18, 42);
+
+    // ---- 连击条：只有 combo > 0 才出现 ----
+    // 倍率用颜色区分（x1 灰 → x5 金），玩家扫一眼就知道自己现在值多少分。
+    if (this.combo > 0) {
+      const cw = 122, ch = 5, cx = 18, cy = 62;
+      const ratio = clamp(this.comboTimer / CFG.COMBO.WINDOW, 0, 1);
+      const lv = this.comboLevel;
+      const colors = ['#7fa7c9', '#7fe8ff', '#ffb457', '#ff9db2', '#ffd479'];
+      const c = colors[lv];
+
+      ctx.font = '700 14px Consolas, "Courier New", monospace';
+      ctx.fillStyle = c;
+      ctx.fillText(this.combo + ' HIT', cx, cy - 3);
+
+      ctx.font = '700 14px Consolas, "Courier New", monospace';
+      ctx.fillStyle = c;
+      ctx.fillText('x' + this.multiplier, cx + 74, cy - 3);
+
+      // 断连倒计时条：把"还剩多久"做成可见的，玩家才会主动去续连
+      ctx.fillStyle = 'rgba(255,255,255,0.14)';
+      ctx.fillRect(cx, cy + 17, cw, ch);
+      ctx.fillStyle = c;
+      ctx.fillRect(cx, cy + 17, cw * ratio, ch);
+    }
+
+    // ---- 左上偏下：生效中的道具计时 ----
+    let py = 96;
+    const timers = [
+      [p.shieldTime, CFG.POWERUP.SHIELD_TIME, '#7fe8ff', 'SHIELD'],
+      [p.spreadTime, CFG.POWERUP.SPREAD_TIME, '#ffb457', 'SPREAD'],
+      [p.rapidTime,  CFG.POWERUP.RAPID_TIME,  '#b48cff', 'RAPID']
+    ];
+    for (let i = 0; i < timers.length; i++) {
+      const [left, full, color, name] = timers[i];
+      if (left <= 0) continue;
+      ctx.font = '600 11px Consolas, "Courier New", monospace';
+      ctx.fillStyle = color;
+      ctx.fillText(name + ' ' + left.toFixed(1) + 's', 18, py);
+      // 剩余比例条：比纯数字更快读懂
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
+      ctx.fillRect(18, py + 14, 96, 3);
+      ctx.fillStyle = color;
+      ctx.fillRect(18, py + 14, 96 * clamp(left / full, 0, 1), 3);
+      py += 24;
+    }
+
+    // ---- 右上：等级 ----
+    ctx.textAlign = 'right';
+    ctx.font = '600 15px Consolas, "Courier New", monospace';
+    ctx.fillStyle = '#ffd479';
+    ctx.fillText('LEVEL ' + this.level, CFG.W - 18, 16);
+
+    // ---- 右上：生命图标（小飞船）----
+    for (let i = 0; i < p.lives; i++) {
+      const x = CFG.W - 26 - i * 24;
+      const y = 50;
+      ctx.beginPath();
+      ctx.moveTo(x, y - 9);
+      ctx.lineTo(x + 7, y + 7);
+      ctx.lineTo(x, y + 3);
+      ctx.lineTo(x - 7, y + 7);
+      ctx.closePath();
+      ctx.fillStyle = '#7fe8ff';
+      ctx.fill();
+    }
+
+    // ---- 右下：冲刺冷却指示 ----
+    // 冲刺是保命技，玩家必须随时知道它能不能用，否则等于没有这个功能。
+    // bottomPad：触屏模式下把底部 HUD 整体上抬，给屏幕按钮让位
+    const bottomPad = this.touchMode ? (this.hudBottomPad || 0) : 0;
+    const ready = p.dashCd <= 0 && !p.isDashing;
+    ctx.textAlign = 'right';
+    ctx.font = '600 11px Consolas, "Courier New", monospace';
+    ctx.fillStyle = ready ? '#8dffb0' : '#55799a';
+    ctx.fillText(ready ? 'DASH ●READY' : 'DASH ' + Math.max(0, p.dashCd).toFixed(1) + 's',
+                 CFG.W - 18, CFG.H - 26 - bottomPad);
+
+    // ---- 左下：当前武器 + 已解锁槽位 ----
+    // 武器是"改变输出方式"的状态，必须常驻可见：
+    // 玩家切到激光后忘了自己拿的是激光、还在等子弹打出去，是最容易发生的困惑。
+    const ORDER = ['pulse', 'twin', 'laser'];
+    const WDEF = CFG.WEAPON[p.weapon.toUpperCase()];
+    ctx.textAlign = 'left';
+    ctx.font = '600 11px Consolas, "Courier New", monospace';
+    ctx.fillStyle = '#d9c6ff';
+    ctx.fillText('WEAPON ' + WDEF.name, 18, CFG.H - 26 - bottomPad);
+
+    // 三个小方块表示"已解锁/当前选中"：不看说明也能立刻明白还有几把枪没拿到
+    for (let i = 0; i < ORDER.length; i++) {
+      const k = ORDER[i];
+      const owned = p.weapons.includes(k);
+      const x = 18 + i * 13;
+      const y = CFG.H - 11 - bottomPad;
+      ctx.fillStyle = owned ? (p.weapon === k ? '#ffffff' : '#b48cff') : 'rgba(255,255,255,0.13)';
+      ctx.fillRect(x, y, 9, 4);
+    }
+
+    // ---- 底部中央：拾取提示 ----
+    if (this.toastTime > 0) {
+      ctx.textAlign = 'center';
+      ctx.font = '600 13px "Segoe UI", "Microsoft YaHei", sans-serif';
+      ctx.globalAlpha = clamp(this.toastTime / 0.5, 0, 1);
+      ctx.fillStyle = '#bcd7ee';
+      ctx.fillText('拾取 ' + this.toast, CFG.W / 2, CFG.H - 30);
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- 顶部中央：Boss 血条 ----
+    if (this.boss) {
+      const bw = 380, bh = 11;
+      const bx = (CFG.W - bw) / 2;
+      const by = 24;
+      const ratio = clamp(this.boss.hp / this.boss.maxHp, 0, 1);
+
+      ctx.textAlign = 'center';
+      ctx.font = '700 12px Consolas, "Courier New", monospace';
+      ctx.fillStyle = '#ff9db2';
+      ctx.fillText('B O S S   ' + this.bossIndex, CFG.W / 2, by - 16);
+
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(bx - 2, by - 2, bw + 4, bh + 4);
+      ctx.fillStyle = ratio > 0.5 ? '#ff6b8a' : (ratio > 0.22 ? '#ffb457' : '#ff3b5c');
+      ctx.fillRect(bx, by, bw * ratio, bh);
+      // 分段刻度：让玩家能数出"还剩几刀"，而不是看一根模糊的滑条
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      for (let i = 1; i < 10; i++) ctx.fillRect(bx + (bw / 10) * i, by, 1, bh);
+    }
+
+    // ---- Boss 预警：红色闪烁边框 ----
+    if (this.bossWarn > 0) {
+      const a = Math.abs(Math.sin(this.bossWarn * 12)) * 0.85;
+      ctx.globalAlpha = a;
+      ctx.strokeStyle = '#ff3b5c';
+      ctx.lineWidth = 6;
+      ctx.strokeRect(3, 3, CFG.W - 6, CFG.H - 6);
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
+  },
+
+  /* ==========================================================================
+   * 状态机
+   * ========================================================================== */
+
+  /**
+   * 切换游戏状态并同步覆盖层界面。
+   * @param {'ready'|'playing'|'paused'|'over'} state 目标状态
+   * @returns {void}
+   */
+  setState(state) {
+    this.state = state;
+    this.renderOverlay();
+  },
+
+  /**
+   * 开始新一局（也会在结束后重开时被调用）。
+   * @returns {void}
+   */
+  start() {
+    this.reset();
+    this.setState('playing');
+    // 清空按键状态：点击按钮后鼠标/键盘可能还有残留按下状态，
+    // 不清掉会出现"刚开局飞船自己就往一个方向飘"的现象
+    Input.clear();
+  },
+
+  /** 从暂停恢复。参数：无。返回：无。 */
+  resume() {
+    this.setState('playing');
+    Input.clear();
+  },
+
+  /** 在 进行中 ⇄ 暂停 之间切换。参数：无。返回：无。 */
+  togglePause() {
+    if (this.state === 'playing') this.setState('paused');
+    else if (this.state === 'paused') this.resume();
+  },
+
+  /**
+   * 游戏结束：结算分数并显示结束界面。
+   * @returns {void}
+   */
+  gameOver() {
+    this.player.lives = 0;
+
+    // 飞船殉爆：大团粒子 + 冲击波 + 一次重震动
+    this.explode(this.player.x, this.player.y, '#7fd8ff', 46, 1.7);
+    this.explode(this.player.x, this.player.y, '#ffd479', 20, 1.1);
+    this.shockwaves.push(new Shockwave(this.player.x, this.player.y, 260, '#7fd8ff', 0.7));
+    this.addShake(CFG.SHAKE_ON_BOMB, CFG.SHAKE_ON_BOMB_MAG);
+    this.flash = 0.45;
+    this.bossWarn = 0;
+
+    // 清掉滞留的敌方子弹：结束界面下它们已经冻结，
+    // 留着会让画面在"任务失败"四个字后面挂着一屏弹幕，很脏。
+    this.enemyBullets.length = 0;
+
+    // 结算最高分并持久化
+    if (this.score > this.best) this.best = this.score;
+    this.recordScore();
+
+    this.setState('over');
+  },
+
+  /**
+   * 复位全部局内数据。
+   * @returns {void}
+   */
+  reset() {
+    this.score = 0;
+    this.elapsed = 0;
+    this.level = 1;
+
+    // 用 length = 0 清空数组而不是重新赋值：保持数组引用不变，
+    // 万一有其他代码持有引用也不会指向一个"废弃的旧数组"
+    this.bullets.length = 0;
+    this.enemies.length = 0;
+    this.particles.length = 0;
+    this.meteors.length = 0;
+    this.shockwaves.length = 0;
+    this.floatTexts.length = 0;
+    this.powerups.length = 0;
+    this.enemyBullets.length = 0;
+
+    // ---- 连击与 Boss 状态 ----
+    this.combo = 0;
+    this.comboTimer = 0;
+    this.boss = null;
+    this.bossIndex = 0;
+    this.bossWarn = 0;
+
+    // ---- 横幅 ----
+    // 重置时要一并清掉横幅和提示，否则上一局的"BOSS 击破"会带进新一局的开场
+    this.banner = '';
+    this.bannerSub = '';
+    this.bannerTime = 0;
+    this.toast = '';
+    this.toastTime = 0;
+
+    // 开局给约 1 秒的缓冲，让玩家有反应时间，不至于一进来就被糊脸
+    this.spawnTimer = 1.0;
+
+    this.shakeTime = 0;
+    this.shakeMag = 0;
+    this.flash = 0;
+    this.laserSparkTimer = 0;
+    // 名次高亮只在"刚打完的那一局"有意义，重开时必须清掉，
+    // 否则上一局的高亮会跟着带进新一局的开场界面
+    this.lastRank = 0;
+
+    this.player.reset();
+  },
+
+  /* ==========================================================================
+   * 一次性按键（开始 / 暂停 / 重开）
+   * ========================================================================== */
+
+  /**
+   * 处理"按下的瞬间"触发的动作（不含长按重复）。
+   * @param {string} k 已转为小写的键名
+   * @returns {void}
+   */
+  handleOneShotKey(k) {
+    // R：任何非初始状态下都能重开
+    if (k === 'r') {
+      if (this.state !== 'ready') this.start();
+      return;
+    }
+
+    // P / Esc：进行中 ⇄ 暂停（顺带支持 Esc 关闭暂停，符合直觉）
+    if (k === 'p' || k === 'escape') {
+      this.togglePause();
+      return;
+    }
+
+    // Shift：冲刺。
+    // 只在游戏进行中响应 —— 在菜单/结束界面按 Shift 不该有任何副作用，
+    // 而且 dash() 内部会读 Input 的方向键来决定冲哪边。
+    if (k === 'shift') {
+      if (this.state === 'playing' && this.player.dash(Input)) this.onDash();
+      return;
+    }
+
+    // Q / Tab：循环切换已解锁武器。
+    // 用"循环"而不是"三选一"，是因为手机上只有一个换枪按钮，
+    // 键盘和触摸必须共用同一套逻辑，否则两边的手感会不一致。
+    if (k === 'q' || k === 'tab') {
+      if (this.state === 'playing') this.switchWeapon(null);
+      return;
+    }
+
+    // 1 / 2 / 3：直接指定武器（键盘玩家的快捷方式）
+    if (k === '1' || k === '2' || k === '3') {
+      if (this.state === 'playing') {
+        this.switchWeapon(['pulse', 'twin', 'laser'][Number(k) - 1]);
+      }
+      return;
+    }
+
+    // 空格 / 回车：菜单确认键
+    if (k === ' ' || k === 'enter') {
+      if (this.state === 'ready' || this.state === 'over') {
+        this.start();
+      } else if (this.state === 'paused') {
+        this.resume();
+      }
+    }
+  },
+
+  /**
+   * 冲刺触发瞬间的视觉反馈。
+   * @returns {void}
+   */
+  onDash() {
+    const p = this.player;
+    // 起点留一圈火花 + 一个小冲击波，玩家才能明确看到"我是从这里冲出去的"，
+    // 否则高速度下位移太快，反而分不清自己有没有真的冲成功。
+    this.spark(p.x, p.y, '#7fe8ff', 14);
+    this.shockwaves.push(new Shockwave(p.x, p.y, 56, '#7fe8ff', 0.28));
+  },
+
+  /**
+   * 切换武器（键盘 Q/1/2/3 与屏幕按钮共用这一条路径）。
+   * @param {string|null} name 目标武器名；传 null 表示按顺序循环到下一把
+   * @returns {void}
+   */
+  switchWeapon(name) {
+    const p = this.player;
+    const W = CFG.WEAPON;
+
+    // 还没解锁任何第二把武器时，按键不该有任何响应 ——
+    // 连按 Q 弹一堆"没有别的枪"的提示只会显得吵
+    if (p.weapons.length <= 1) return;
+
+    const before = p.weapon;
+    if (name) p.switchWeapon(name);
+    else p.cycleWeapon();
+    if (p.weapon === before) return;   // 没真的换成就别播反馈
+
+    const def = W[p.weapon.toUpperCase()];
+    this.toast = def.name;
+    this.toastTime = 1.2;
+    this.floatTexts.push(new FloatText(
+      p.x, p.y - 40, def.name, '#d9c6ff', 15, 0.7
+    ));
+    this.shockwaves.push(new Shockwave(p.x, p.y, 52, '#b48cff', 0.3));
+  },
+
+  /* ==========================================================================
+   * 覆盖层 UI 与最高分持久化
+   * ========================================================================== */
+
+  /**
+   * 根据当前状态刷新覆盖层文案与按钮。
+   * @returns {void}
+   */
+  renderOverlay() {
+    const ov = this.overlay;
+
+    // 进行中：隐藏覆盖层（同时会通过 CSS 的 pointer-events 取消命中）
+    if (this.state === 'playing') {
+      ov.classList.add('hidden');
+      return;
+    }
+    ov.classList.remove('hidden');
+
+    if (this.state === 'ready') {
+      this.ovTitle.textContent = '星 际 防 线';
+      this.ovSub.textContent = '守住底部防线，击落一切来犯之敌';
+      // 开始界面把"这局能玩到什么"提前摊开：
+      // 连击、道具、武器、Boss 是这局的核心玩法，玩家不看说明也得能注意到
+      this.ovStats.innerHTML = this.best > 0
+        ? '历史最高分 <b>' + this.best + '</b><br>' +
+          '<span style="font-size:.92em;opacity:.85">连击累积倍率（最高 x5）· 击落掉道具 · 3 种武器可切换 · 每 5 级 BOSS 战</span>'
+        : '连续击杀累积倍率 · 击落敌机掉落道具 · 每 5 级 BOSS 战';
+      this.ovBtn.textContent = '开始游戏';
+
+    } else if (this.state === 'paused') {
+      this.ovTitle.textContent = '已 暂 停';
+      this.ovSub.textContent = '按 P / Esc，或点击按钮继续';
+      this.ovStats.innerHTML =
+        '当前得分 <b>' + this.score + '</b> · 到达 <b>Lv.' + this.level + '</b>' +
+        (this.combo > 0 ? ' · 连击 <b>' + this.combo + '</b> (x' + this.multiplier + ')' : '');
+      this.ovBtn.textContent = '继续游戏';
+
+    } else {   // over
+      this.ovTitle.textContent = '任 务 失 败';
+      this.ovSub.textContent = '飞船已被摧毁';
+      // 把结算数据一次摆出来，玩家能立刻知道这局表现如何。
+      // 连击、武器、Boss 都是新增的目标维度，所以也放进结算里 ——
+      // 只报总分的话，玩家没有动力去追"不断连"和"打通 Boss"。
+      this.ovStats.innerHTML =
+        '本局得分 <b>' + this.score + '</b> · 存活 <b>' + this.elapsed.toFixed(1) + 's</b>' +
+        ' · 到达 <b>Lv.' + this.level + '</b>' +
+        (this.bossIndex > 0 ? ' · 击破 BOSS <b>' + this.bossIndex + '</b>' : '') +
+        '<br>' +
+        // 进了榜就明确报出名次：这是排行榜最核心的反馈，不说出来等于没做
+        (this.lastRank > 0
+          ? '本局排名 <b>第 ' + this.lastRank + ' 名</b> · 历史最高 <b>' + this.best + '</b>'
+          : '历史最高 <b>' + this.best + '</b>');
+      this.ovBtn.textContent = '再来一局（R）';
+    }
+
+    // 排行榜在三个状态下都要刷新：ready 看目标、over 看新名次、paused 顺手看一眼
+    this.renderBoard();
+  },
+
+  /**
+   * 读取本地存档（最高分 + Top 5 排行榜）。
+   * @returns {void}
+   */
+  loadBest() {
+    const K = CFG.BOARD;
+    let best = 0;
+    let list = [];
+
+    // file:// 协议或隐私模式下 localStorage 可能直接抛异常，
+    // 用 try/catch 静默降级，绝不能因为读不了存档就把游戏搞崩
+    try {
+      const raw = window.localStorage.getItem(K.KEY_SCORES);
+      const arr = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(arr)) list = this.sanitizeScores(arr);
+
+      const v = parseInt(window.localStorage.getItem(K.KEY_BEST) || '0', 10);
+      if (isFinite(v) && v > 0) best = v;
+    } catch (err) {
+      list = [];
+      best = 0;
+    }
+
+    // ---- 旧存档迁移 ----
+    // v1.1 及以前只存了一个数字（最高分）。第一次读到新格式时，把它当成
+    // "一条没有细节的历史记录"塞进榜单 —— 否则老玩家一更新就会发现
+    // 排行榜是空的，看起来像记录被清掉了。
+    if (list.length === 0 && best > 0) {
+      list = [{ score: best, level: 0, elapsed: 0, ts: 0 }];
+    }
+
+    this.scores = list;
+    this.best = list.length > 0 ? Math.max(best, list[0].score) : best;
+    this.lastRank = 0;
+  },
+
+  /**
+   * 清洗排行榜数据。
+   * @param {Array} arr 从 localStorage 读到的原始数组
+   * @returns {Array<{score:number,level:number,elapsed:number,ts:number}>}
+   * 为什么必须清洗：localStorage 里的内容是玩家随手就能改的，也可能被旧版本
+   * 写坏。少这一步的话，一条 score 为字符串或 NaN 的记录会让排序退化成
+   * 随机顺序，NaN 还会一路污染到 HUD 的 padStart，最后显示成 "NaN"。
+   */
+  sanitizeScores(arr) {
+    const out = [];
+    for (let i = 0; i < arr.length; i++) {
+      const e = arr[i];
+      if (!e || typeof e !== 'object') continue;
+
+      const score = Math.floor(Number(e.score));
+      if (!isFinite(score) || score <= 0) continue;
+
+      const level = Math.floor(Number(e.level));
+      const elapsed = Number(e.elapsed);
+      const ts = Number(e.ts);
+      out.push({
+        score: score,
+        level: (isFinite(level) && level > 0) ? level : 0,
+        elapsed: (isFinite(elapsed) && elapsed > 0) ? elapsed : 0,
+        ts: (isFinite(ts) && ts > 0) ? ts : 0
+      });
+    }
+    out.sort((a, b) => b.score - a.score);
+    return out.slice(0, CFG.BOARD.KEEP);
+  },
+
+  /**
+   * 记录本局成绩到排行榜。
+   * @returns {number} 本局名次（1 起）；没进榜返回 0
+   */
+  recordScore() {
+    const entry = {
+      score: this.score,
+      level: this.level,
+      elapsed: Math.round(this.elapsed * 10) / 10,
+      ts: Date.now()
+    };
+
+    this.scores.push(entry);
+    this.scores.sort((a, b) => b.score - a.score);
+    if (this.scores.length > CFG.BOARD.KEEP) this.scores.length = CFG.BOARD.KEEP;
+
+    // 名次用"对象引用"反查，而不是拿分数去比。
+    // 两局同分时按分数比较永远只会命中第一条，玩家会看到错误的名次；
+    // 被截断掉的成绩 indexOf 返回 -1，正好等价于"没进榜"。
+    this.lastRank = this.scores.indexOf(entry) + 1;
+
+    this.saveBest();
+    return this.lastRank;
+  },
+
+  /** 写入本地存档（最高分 + 排行榜）。参数：无。返回：无。 */
+  saveBest() {
+    const K = CFG.BOARD;
+    try {
+      window.localStorage.setItem(K.KEY_BEST, String(this.best));
+      window.localStorage.setItem(K.KEY_SCORES, JSON.stringify(this.scores));
+    } catch (err) {
+      /* 存不了就算了，不影响本局游戏 */
+    }
+  },
+
+  /**
+   * 把排行榜渲染到覆盖层。
+   * @returns {void}
+   */
+  renderBoard() {
+    const el = this.ovBoard;
+    if (!el) return;
+
+    const list = this.scores;
+    if (!list || list.length === 0) {
+      // 一条记录都没有时整块收起：留一个空框比不显示更难看
+      el.classList.remove('show');
+      el.innerHTML = '';
+      return;
+    }
+
+    let html = '<div class="bhead">本 地 排 行 榜 · TOP ' + CFG.BOARD.KEEP + '</div>';
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      // 只有刚打完的那一局会被高亮，玩家一眼就能在榜上找到自己
+      const now = (this.state === 'over' && (i + 1) === this.lastRank) ? ' now' : '';
+      // 迁移进来的旧记录没有等级/时长信息，如实写"历史记录"而不是编一个 Lv.1
+      const meta = e.level > 0
+        ? 'Lv.' + e.level + ' · ' + e.elapsed.toFixed(1) + 's'
+        : '历史记录';
+      html += '<div class="brow' + now + '">' +
+                '<span class="rk">' + (i + 1) + '</span>' +
+                '<span class="sc">' + e.score + '</span>' +
+                '<span class="meta">' + meta + '</span>' +
+              '</div>';
+    }
+    el.innerHTML = html;
+    el.classList.add('show');
+  },
+
+  /* ==========================================================================
+   * 触屏辅助 UI
+   * ========================================================================== */
+
+  /**
+   * 初始化触屏按钮（只需一次）。
+   * @returns {void}
+   */
+  initTouchUI() {
+    // ---- 判定初始是否处于触屏模式 ----
+    // 只看 pointer: coarse（"主输入设备是手指"）这一个信号。
+    // 刻意不用 navigator.maxTouchPoints / 'ontouchstart' in window：
+    // 带触摸屏的笔记本、以及 Chrome 开了 --touch-events 时，这两个都会报"有触摸"，
+    // 于是桌面玩家会莫名其妙多出两个挡住画面的按钮 —— 而鼠标用户根本不需要它们。
+    // 真正的兜底是下面那个"第一次收到真实触摸事件"的监听，那个信号才没有歧义。
+    const hasMM = typeof window !== 'undefined' &&
+                  typeof window.matchMedia === 'function' &&
+                  window.matchMedia('(pointer: coarse)').matches;
+    this.touchMode = !!hasMM;
+    if (this.touchMode && this.wrap) this.wrap.classList.add('touch-mode');
+
+    // 兜底：第一次真的收到触摸事件时，无条件再开一次。
+    if (typeof window.addEventListener === 'function') {
+      window.addEventListener('pointerdown', (ev) => {
+        if (ev.pointerType !== 'touch' || this.touchMode) return;
+        this.touchMode = true;
+        if (this.wrap) this.wrap.classList.add('touch-mode');
+        this.measureTouchPad();
+      }, { passive: true });
+
+      // 屏幕尺寸/方向变化后按钮的物理尺寸不变，但它占的逻辑高度会变
+      // （画布缩放比例变了），所以要重新量一次。
+      window.addEventListener('resize', () => this.measureTouchPad(), { passive: true });
+      window.addEventListener('orientationchange', () => this.measureTouchPad(), { passive: true });
+    }
+
+    this.measureTouchPad();
+
+    // ---- 冲刺按钮 ----
+    // 只在游戏中生效：结束界面上按到按钮不该产生任何副作用。
+    // 用 pointerdown 而不是 click：click 要等手指抬起（有 100ms 量级的延迟），
+    // 保命技晚 100ms 就等于无效。
+    if (this.touchDash) {
+      this.touchDash.addEventListener('pointerdown', (ev) => {
+        ev.preventDefault();
+        this.touchDash.blur();
+        if (this.state === 'playing') Input.requestDash();
+      }, { passive: false });
+    }
+
+    // ---- 换枪按钮 ----
+    if (this.touchWeapon) {
+      this.touchWeapon.addEventListener('pointerdown', (ev) => {
+        ev.preventDefault();
+        this.touchWeapon.blur();
+        if (this.state === 'playing') this.switchWeapon(null);
+      }, { passive: false });
+    }
+  },
+
+  /**
+   * 测量屏幕按钮占用的"逻辑高度"，用于让底部 HUD 让位。
+   * @returns {void}
+   * 只在初始化与 resize 时算，绝不在每帧算：每帧读 getBoundingClientRect()
+   * 会强制浏览器做同步重排（layout thrashing），在手机上足够吃掉十几帧。
+   */
+  measureTouchPad() {
+    if (!this.canvas || !this.touchDash) return;
+    // 精简沙箱（无布局引擎）里 canvas 没有 getBoundingClientRect，
+    // 量不出来就保持 0，HUD 位置退回默认值即可 —— 这不是错误路径。
+    if (typeof this.canvas.getBoundingClientRect !== 'function') return;
+    const cr = this.canvas.getBoundingClientRect();
+    if (!cr || cr.height <= 0) return;
+    if (typeof this.touchDash.getBoundingClientRect !== 'function') return;
+    const bh = this.touchDash.getBoundingClientRect().height;
+    if (!(bh > 0)) return;
+    // +34 = 按钮下边距(14) + 一点呼吸空间，避免 HUD 文字紧贴按钮
+    this.hudBottomPad = Math.round((bh + 34) / cr.height * CFG.H);
+  },
+
+  /**
+   * 同步触屏按钮的外观（冲刺冷却）。
+   * @returns {void}
+   */
+  syncTouchUI() {
+    if (!this.touchMode || !this.touchDash) return;
+    const p = this.player;
+
+    const ready = p.dashCd <= 0 && !p.isDashing;
+    // 只在"状态真的变了"时才写 DOM。每帧无条件写 classList / textContent 会
+    // 触发样式重算和重排，在手机上这 60 次/秒的开销足够吃掉好几帧。
+    if (ready !== this._dashReady) {
+      this._dashReady = ready;
+      this.touchDash.classList.toggle('cooling', !ready);
+    }
+    const label = ready ? '冲刺' : Math.max(0, p.dashCd).toFixed(1);
+    if (label !== this._dashLabel) {
+      this._dashLabel = label;
+      this.touchDashText.textContent = label;
+    }
+
+    // 换枪按钮上直接写着当前武器名：手机上没地方看 HUD 左下角的小字，
+    // 按钮本身就是最好的状态显示位。
+    const wname = CFG.WEAPON[p.weapon.toUpperCase()].name;
+    if (wname !== this._weaponLabel && this.touchWeaponText) {
+      this._weaponLabel = wname;
+      this.touchWeaponText.textContent = wname;
+      // 只有一把枪时按钮变暗，玩家一眼知道"现在按了也没用"
+      this.touchWeapon.classList.toggle('dim', p.weapons.length <= 1);
+    }
+  }
+};
+
+/* ============================================================================
+ * 6. 启动
+ * ========================================================================== */
+if (document.readyState === 'loading') {
+  // DOM 还没就绪（脚本放在 body 末尾通常不会走到这里，但稳妥起见保留分支）
+  document.addEventListener('DOMContentLoaded', () => Game.init());
+} else {
+  Game.init();
+}
+
+/* ============================================================================
+ * 7. 自动化验证钩子
+ *    —— 以只读方式暴露内部状态，供 verify/selftest.js 断言。
+ *
+ *    为什么值得在交付代码里留这么一个口子：
+ *    游戏逻辑全部包在 IIFE 里，外部脚本只能靠"反解绘制调用"来猜发生了什么
+ *    （比如数 arc() 的半径来判断精英敌有没有出现）。那种测试极其脆弱 ——
+ *    改一下画法就失效，而且它证明的是"画了某个圆"，不是"逻辑真的对了"。
+ *    有了这个引用，自检可以直接断言连击倍率、震动时长、道具计时、Boss 血量
+ *    这些真正的内部状态，测试强度完全不同量级。
+ *
+ *    它只是一个对象引用，不注册任何事件、不改变任何运行行为，
+ *    在浏览器控制台里也顺便方便调试。
+ * ========================================================================== */
+if (typeof window !== 'undefined') {
+  window.__SpaceLine = {
+    game: Game,
+    CFG: CFG,
+    Input: Input,
+    classes: { Player, Bullet, Enemy, PowerUp, Boss, EnemyBullet, Shockwave, FloatText }
+  };
+}
+
+})();
+</script>
+</body>
+</html>

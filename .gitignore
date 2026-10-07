@@ -1,0 +1,42 @@
+# ==============================================================================
+#  星际防线 SpaceLine · Git 忽略规则
+# ------------------------------------------------------------------------------
+#  原则：仓库里只放「人写的」文件，不放「生成的」文件。
+#  这个项目的构建产物是源文件的几千倍（exe + zip + node_modules 加起来 1.3 GB），
+#  而且全部可以由 index.html 重新生成 —— 一旦提交进历史就永久留在 pack 里，
+#  再想清掉要重写历史，代价极高。
+# ==============================================================================
+
+# ---- 依赖 ----
+node_modules/
+
+# ---- Electron 打包产物（每个版本约 250 MB，实测 release_v120 单体 477 MB）----
+#  用 release* 通配可以一次覆盖 release / release_build / release_v100 / v110 / v120，
+#  以后加版本号目录也不必再改这里。
+release*/
+
+# ---- 发布压缩包 ----
+#  zip 只留说明文档；压缩包本体走 release 附件或网盘，不进 Git
+dist/*
+!dist/使用说明.txt
+
+# ---- 由根目录 index.html 同步生成的副本 ----
+#  跑 `node desktop/tools/sync-renderer.js` 与 `cp index.html web/index.html` 即可重建。
+#  保证「源只有一份」——两份副本进了仓库，早晚会有人改了副本忘了改源。
+web/
+desktop/renderer/
+
+# ---- 验证脚本的临时产物 ----
+#  _edgeprofile* 是 headless 浏览器的 user-data-dir，一次跑下来 31 MB
+verify/_edgeprofile*/
+verify/_check.js
+verify/_shot_*.png
+verify/_zoom_banner.png
+desktop/shots/
+desktop/_asar_index.html
+_asar/
+
+# ---- 杂项 ----
+*.log
+.DS_Store
+Thumbs.db

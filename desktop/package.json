@@ -1,0 +1,52 @@
+{
+  "name": "space-line-desktop",
+  "version": "1.2.0",
+  "description": "星际防线 SpaceLine —— 单文件太空射击游戏的桌面版（Electron 壳）",
+  "main": "main.js",
+  "author": "kevin0521-wjw",
+  "license": "MIT",
+  "scripts": {
+    "sync": "node tools/sync-renderer.js",
+    "start": "npm run sync && electron .",
+    "pack": "npm run sync && electron-builder --win --dir",
+    "dist": "npm run sync && electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "33.4.11",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.kevin0521.spaceline",
+    "productName": "SpaceLine",
+    "copyright": "© 2026 kevin0521-wjw",
+    "directories": {
+      "output": "release"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "npmRebuild": false,
+    "files": [
+      "main.js",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        { "target": "portable", "arch": ["x64"] },
+        { "target": "nsis", "arch": ["x64"] }
+      ]
+    },
+    "portable": {
+      "artifactName": "SpaceLine-${version}-portable.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "星际防线",
+      "artifactName": "SpaceLine-${version}-setup.${ext}"
+    }
+  }
+}
