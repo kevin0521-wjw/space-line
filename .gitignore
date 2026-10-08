@@ -34,8 +34,9 @@ verify/_shot_*.png
 verify/_zoom_banner.png
 # aitest / browsertest 的原始输出（逐帧日志，一次几 MB，只用于当次排查）
 verify/_*.txt
-# 一次性的改写脚本（用完即弃，不该留在仓库里）
+# 一次性的改写脚本与 API 响应快照（用完即弃，不该留在仓库里）
 verify/_*.py
+verify/_*.json
 desktop/shots/
 desktop/_asar_index.html
 _asar/
