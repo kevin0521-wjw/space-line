@@ -193,6 +193,25 @@ const info = (label, val) => console.log('     · ' + label + ': ' + val);
   check('公网页面上挂着 AI 自动模式的钩子',
         (await evaluate('!!(window.__SpaceLine && window.__SpaceLine.AutoPilot)')) === true);
 
+  /* ---- 证明线上跑的是「修好导航与冲刺」那一份，而不只是"带 AI 的旧版" ----
+     字节相同只能证明发对了文件，证明不了线上那份里真的有这轮改的逻辑。
+     这里挑两个**确定性**的标志物（不依赖随机局面）：
+       ① 导航用的 _urgent() 方法存在；
+       ② 冲刺的"赶路"参数 DASH_RUSH 已就位。
+     刻意不写"AI 在 N 秒内一定按了 shift"这种断言 —— 那是概率事件，
+     拿它当断言就是给自己埋一个偶发红灯。 */
+  const aiFix = JSON.parse(await evaluate(`(function(){
+    var A = __SpaceLine.AutoPilot, C = __SpaceLine.CFG.AI;
+    return JSON.stringify({urgent: typeof A._urgent, dashRush: C.DASH_RUSH,
+                           leakSave: C.LEAK_SAVE, bodyMax: C.BODY_MAX});
+  })()`));
+  check('线上这一份含修好的导航逻辑（_urgent 存在）', aiFix.urgent === 'function',
+        '_urgent = ' + aiFix.urgent);
+  check('线上这一份含冲刺赶路与贴脸威胁参数',
+        aiFix.dashRush > 0 && aiFix.leakSave > 0 && aiFix.bodyMax > 1,
+        'DASH_RUSH=' + aiFix.dashRush + ' LEAK_SAVE=' + aiFix.leakSave
+        + ' BODY_MAX=' + aiFix.bodyMax);
+
   const aiBefore = JSON.parse(await evaluate(`(function(){
     var p = __SpaceLine.game.player;
     return JSON.stringify({x:Math.round(p.x), y:Math.round(p.y), lives:p.lives});
