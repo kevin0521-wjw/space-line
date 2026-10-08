@@ -30,15 +30,19 @@ const check = (label, ok, extra = '') => {
 };
 
 (async () => {
-  /* ---- 每次运行都从干净的 profile 开始 ----
+  /* ---- 每次运行都从干净的存档开始 ----
      ⚠️ 这里曾经埋着一个"测试不可重复运行"的坑：--user-data-dir 是持久目录，
      localStorage 会跨运行保留，而脚本只在阶段二清过 storage。
      于是"上一轮跑出过成绩"会让下一轮阶段一的两条断言直接失败
      （空存档时排行榜应隐藏 / 结束后成绩条数应为 1），
      表现为"排行榜坏了"，实际是测试自己带进来的脏数据。
-     解法不是每次手工删目录：在启动浏览器之前直接清掉。 */
+     ⚠️ 解法换过一次：原本是"启动前 fs.rmSync 整个 profile 目录"，
+     但那个目录一次跑下来有 374 个文件，触发了批量删除的安全守卫
+     （SAFE_DELETE_BULK_CONFIRM_REQUIRED），测试直接跑不起来 ——
+     也就是说"为了可重复"而写的清理动作本身成了阻塞。
+     现在改成按目标清：页面加载后用 CDP 把该 origin 的 storage 清空，
+     精准、只碰这一个源的数据，而且不依赖任何文件系统删除。 */
   const profile = path.join(CWD, '_edgeprofile');
-  fs.rmSync(profile, { recursive: true, force: true });
 
   const proc = spawn(EDGE, [
     '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
@@ -114,6 +118,11 @@ const check = (label, ok, extra = '') => {
    * ==================================================================== */
   console.log('阶段一：桌面（键盘 / 鼠标）');
   await send('Page.navigate', { url: PAGE_URL });
+  await waitReady();
+  // 清掉上一次运行残留的存档，然后**重载**一次 ——
+  // 必须在页面脚本读 localStorage 之前清完，所以"清 + reload"两步缺一不可。
+  await evaluate('(function(){try{localStorage.clear();}catch(e){}return 1;})()');
+  await send('Page.reload', {});
   await waitReady();
 
   check('画布逻辑分辨率固定 800×600',

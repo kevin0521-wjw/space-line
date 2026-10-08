@@ -486,6 +486,33 @@ const CFG = {
     MARGIN: 5,               // 额外安全边距（像素）：不贴着弹道擦过去，留一点余量
     NEAR_MISS: 2.4,          // 危险度衰减半径 = 判定半径 × 该值，之外视为无威胁
     DASH_AT: 1.0,            // 最优格的危险度超过该值 = "已经躲不掉了"，用冲刺无敌帧硬扛
+    BODY_WINDOW: 0.5,        // 敌机本体只在「还有这么多秒就落到我头上」时才算威胁。
+                             // 0.5 秒 ≈ 敌机在最高等级下 124px 的行程 —— 此时横向躲开
+                             // 还来得及（PLAYER.SPEED × 0.5 = 170px），而再早的话
+                             // 它只是个靶子，把靶子算成威胁正是 AI 以前不敢接敌的原因
+    BODY_CURVE: 3,           // 威胁随剩余时间的三次衰减：0.5s 处≈0，贴脸时才陡增。
+                             // 用三次而不是线性，是为了让 AI 能安安心心把瞄准打完，
+                             // 只在真的来不及的那一刻才放弃输出
+    BODY_MAX: 1.6,           // 贴脸时的威胁峰值。刻意 > DASH_AT：最后一刻必然触发冲刺，
+                             // 于是"躲不掉的撞击"由冲刺的无敌帧来解，而不是靠提前缩头
+    DASH_RUSH: 140,          // 冲刺赶路的触发距离。一次冲刺位移 900×0.16 = 144px，
+                             // 所以横向差不到 140px 时"冲过去"和"飞过去"差不多，不值得花冷却
+    DASH_RUSH_URGENT: 0.5,   // 走过去要花掉"剩余可击杀时间"的一半以上 → 说明要来不及了。
+                             // 判据用比值而不是固定秒数：远处的敌机和贴底的敌机
+                             // 紧迫程度完全不同，只有"来不来得及"才是真正的问题
+    DASH_RUSH_CLEAR: 0.2,    // 只在身边足够干净（最优格危险度低于此值）时才敢盲冲。
+                             // 冲刺方向一旦锁定就改不了，乱冲有可能一头扎进弹幕
+    LEAK_HORIZON: 3.0,       // 提前多少秒开始惦记"这架要漏了"。必须 ≥ 横穿全屏所需时间
+                             // （W / PLAYER.SPEED ≈ 2.35s），否则想到了也赶不过去
+    LEAK_CURVE: 0.7,         // 漏怪紧迫度曲线指数。0.7 < 1，让"还早"的敌机也有一点牵引力，
+                             // 不至于非等到很急才开始横移
+    LEAK_SAVE: 5.0,          // 救下一架要漏的敌机的权重。取 ≈ SAFETY 是有意的：
+                             // 漏一架扣一命、挨一次打也扣一命，游戏规则里这两件事等价，
+                             // 目标函数里就该等价 —— 否则 AI 会为了 0.1 的危险度放弃一条命
+    NAV_REACH: 1000,         // 导航牵引的作用半径。⚠️ 用线性核而不是高斯核：
+                             // 高斯核在 200px 外梯度就衰减到几乎为 0，AI 只会"轻微偏一点"，
+                             // 不会真的赶过去 —— 实测正是这一点让漏怪卡在每局 5.7 架下不来。
+                             // 线性核的梯度是常数，多远都拽得动。
     POWERUP_PULL: 0.45,      // 道具吸引权重（危险度权重压得住它，只在安全时才生效）
     RUSH_BOTTOM: 0.9,        // 敌机越接近底部，击杀优先级越高 —— 漏怪同样扣命
     Y_MIN_RATIO: 0.52,       // AI 的纵向活动范围（占画布高度）。
@@ -1195,14 +1222,31 @@ const AutoPilot = {
     ptr.dx = clamp(dx / lead, -1, 1);
     ptr.dy = clamp(dy / lead, -1, 1);
 
-    // ---- 躲不掉就冲刺 ----
-    // 冲刺自带 0.22 秒无敌帧，是整套系统里唯一的"硬解"。
+    // ---- 冲刺的两个用途 ----
+    // ① **硬解**：连最优格都躲不掉了（整张网格无解）→ 用 0.22 秒无敌帧扛过去。
+    //    判据是「**最优格**的危险度」而不是"我现在的危险度"：
+    //    全网格都躲不开，才叫躲不掉 —— 只要还有一格安全，走位就够了，不必浪费这 1.1 秒冷却。
+    // ② **赶路**：去救一架快要漏掉的敌机，而它离得太远、走过去来不及 → 冲过去抢时间。
+    //    这一条是从实测数据补上的：漏怪时 AI 离那架敌机平均 270px，93% 是"压根没赶过去"。
+    //    冲刺 0.16 秒走 144px，比横向飞过去快一倍多，人类玩家就是这么用它的。
+    //    但方向一旦锁定就改不了，所以只在身边干净时才敢盲冲。
     // 必须放在最后：dash() 会读 pointer.dx/dy 决定冲哪边，而上面刚写进去的航向
-    // 正好就是"全网格里最安全的方向"，于是冲刺也是朝安全处冲。
+    // 正好就是"全网格里最安全的方向"，于是冲刺也是朝安全处（或朝该救的那架）冲。
     // （若 dx/dy 恰好都是 0，dash() 内部会退回"向上冲"，那是脱险方向的常见默认值。）
+    // 为什么以前它从不按 shift：旧的敌机本体用的是"时间到命中"推演，把最优格的危险度
+    //   长期压在 0.1 以下（实测峰值 0.11），DASH_AT=1.0 永远够不着 —— 是个结构性死代码。
+    //   现在 BODY_MAX(1.6) > DASH_AT(1.0)，敌机贴脸那一刻必然越过阈值。
     this.input._dash = false;
-    if (plan.danger >= CFG.AI.DASH_AT && p.dashCd <= 0 && !p.isDashing) {
-      this.input._dash = true;
+    if (p.dashCd <= 0 && !p.isDashing) {
+      if (plan.danger >= CFG.AI.DASH_AT) {
+        this.input._dash = true;
+      } else if (plan.danger < CFG.AI.DASH_RUSH_CLEAR) {
+        const u = this._urgent(game);
+        const walking = u ? u.gap / CFG.PLAYER.SPEED : 0;   // 飞过去要多久
+        if (u && u.gap > CFG.AI.DASH_RUSH && walking > u.tdead * CFG.AI.DASH_RUSH_URGENT) {
+          this.input._dash = true;
+        }
+      }
     }
   },
 
@@ -1239,6 +1283,35 @@ const AutoPilot = {
       }
     }
     return { x: bx, y: by, danger: bd };
+  },
+
+  /**
+   * 找出现在"最该去救"的那一架敌机（只给冲刺赶路用）。
+   * @param {object} game Game 实例
+   * @returns {{x:number,gap:number,tdead:number}|null} 目标信息；没有则 null
+   *
+   * 为什么不复用 _gain 的导航项：那一项是"逐格打分"，回答的是"哪一格最值得待"；
+   * 这里回答的是"我该不该冲过去抢时间"，是另一个问题 ——
+   * 它需要知道目标离我多远、以及走过去的耗时和剩余可击杀时间之比。
+   * 硬塞进 _gain 会让那个函数既算位置又做决策，两头都说不清。
+   */
+  _urgent(game) {
+    const A = CFG.AI;
+    const p = game.player;
+    const killLine = CFG.H * A.Y_MAX_RATIO;
+    let best = null, bestDoom = 0;
+    for (let i = 0; i < game.enemies.length; i++) {
+      const e = game.enemies[i];
+      if (e.y < 0 || e.y >= p.y) continue;                  // 打不到的不管
+      const tdead = e.speed > 1e-3 ? (killLine - e.y) / e.speed : Infinity;
+      if (tdead <= 0 || tdead >= A.LEAK_HORIZON) continue;
+      const doom = Math.pow(1 - tdead / A.LEAK_HORIZON, A.LEAK_CURVE);
+      if (doom > bestDoom) {
+        bestDoom = doom;
+        best = { x: e.x, gap: Math.abs(e.x - p.x), tdead };
+      }
+    }
+    return best;
   },
 
   /**
@@ -1288,25 +1361,26 @@ const AutoPilot = {
     }
 
     // ---- 敌机本体 ----
-    // 与敌弹同一套逻辑，只是它自己的坐标也在动（匀速下落 + 横向漂移，撞墙反弹不预测）
+    // ⚠️ 这里刻意 **不** 用与敌弹相同的"时间到命中"推演，这是修一个实测出来的大坑：
+    //   敌弹只能躲，所以"它飞到这一行"确实就是威胁；
+    //   但敌机是**可以打掉**的，用同一套推演会把「我该站到它下面开火」判成高危 ——
+    //   实测那一格的危险度是 8.01，乘上 SAFETY 是 -33 分，而击杀收益只有 1.34。
+    //   结果 AI 宁可站着不动让敌机漏掉，也不敢过去接敌：87% 的命都丢在漏怪上。
+    // 改成"贴脸才算威胁"：只在它还有 BODY_WINDOW 秒就要落到这一行时才计入，
+    //   且随剩余时间三次衰减（BODY_CURVE）—— 于是 AI 能安心把瞄准打完，
+    //   只在真的来不及那一刻才放弃输出。峰值 BODY_MAX > DASH_AT，
+    //   所以最后一刻必然触发冲刺：躲不掉的撞击由无敌帧来解，而不是靠提前缩头。
     const es = game.enemies;
     for (let i = 0; i < es.length; i++) {
       const e = es[i];
+      const tArrive = e.speed > 1e-3 ? (y - e.y) / e.speed : Infinity;
+      // tArrive ≤ 0：它已经在这一行下方了，正在远离（敌机只往下落）→ 不构成威胁
+      if (tArrive <= 0 || tArrive > A.BODY_WINDOW) continue;
       const rr = p.r + e.r + A.MARGIN;
-      const t = e.speed > 1e-3 ? (y - e.y) / e.speed : Infinity;
-      let dist, tt;
-      if (t > 0 && t <= A.HORIZON) {
-        dist = Math.abs(e.x + e.vx * t - x);
-        tt = t;
-      } else if (Math.abs(e.y - y) < rr + 30) {
-        dist = Math.hypot(e.x - x, e.y - y);
-        tt = 0.05;
-      } else {
-        continue;
-      }
+      const dist = Math.abs(e.x + e.vx * tArrive - x);
       if (dist >= rr * A.NEAR_MISS) continue;
-      const near = dist <= rr ? 1 : 1 - (dist - rr) / (rr * decay);
-      danger += near / (tt + 0.08);
+      const near = dist <= rr ? 1 : 1 - (dist - rr) / (rr * (A.NEAR_MISS - 1));
+      danger += near * A.BODY_MAX * Math.pow(1 - tArrive / A.BODY_WINDOW, A.BODY_CURVE);
     }
 
     // ---- Boss 本体 ----
@@ -1332,10 +1406,13 @@ const AutoPilot = {
     let gain = 0;
 
     // ---- 敌机 ----
+    // ⚠️ 必须带 y 门槛：子弹只向上飞，站在这一格只能打到"还在我上方"的敌机。
+    // 少了这个门槛，AI 会站得高高的（实测它常年缩在 312，也就是活动区上界）
+    // 去"瞄"已经掉到它下面的敌机 —— 那根本打不到，于是漏怪。
     const es = game.enemies;
     for (let i = 0; i < es.length; i++) {
       const e = es[i];
-      if (e.y < 0) continue;   // 还没进场，打了也打不着
+      if (e.y < 0 || y <= e.y) continue;   // 还没进场 / 已经掉到我下方，都打不着
       // 越接近底部越急：漏掉一架同样扣一命，所以击杀优先级必须跟着上涨。
       // 这一项是 AI 不会退化成"只躲不打"的关键。
       const rush = clamp((e.y - 120) / (CFG.H - 420), 0, 1);
@@ -1343,6 +1420,41 @@ const AutoPilot = {
       const off = e.x - x;
       gain += w * Math.exp(-(off * off) / (2 * spread * spread));
     }
+
+    // ---- 导航：挑一架"最该去救"的敌机，然后赶过去 ----
+    // 上面那个循环用的是窄核（spread 只有 18~38px），它只回答"我有没有对准"，
+    // 回答不了"要不要往那边走"。于是 AI 一辈子只打恰好落到自己头上的那几架，
+    // 屏幕另一侧的敌机从生成到漏掉它全程无感 —— 实测 67% 的命就是这么丢的。
+    //
+    // 五个要点，每一个都是实测逼出来的：
+    // ① **取 max 而不是求和**。求和会造出一个"多点吸引力"的势场，
+    //    于是 AI 停在几架待漏敌机的**正中间**，谁也没救到 ——
+    //    实测漏怪时它离那架敌机平均 220px，77% 的情况是"压根没赶过去"。
+    //    取 max 等于"认准最该救的那一架、赶过去"，这才是导航该有的行为。
+    // ② 用**线性**核而不是高斯核：高斯核在 200px 外梯度就衰减到几乎为零，
+    //    AI 只会"轻微偏一点"而不是真的赶过去。线性核的梯度是常数，多远都拽得动。
+    // ③ y 门槛（y > e.y）：从这一格根本打不到它就不该给分。
+    //    这一条同时在"教"AI 往下站 —— 站得越低，能打的敌机越多。
+    // ④ 死线取**AI 自己的击杀下界**（Y_MAX_RATIO 那一行）而不是漏怪线：
+    //    敌机一旦掉到那条线以下，AI 就再也打不到它了（子弹只向上飞）。
+    //    用漏怪线当死线会白送 0.3~0.4 秒，实测漏怪时敌机的 y 全是 617~630。
+    // ⑤ "赶不赶得到"的软化因子：追一个时限内到不了的目标，等于把别的敌机一起漏掉。
+    const killLine = CFG.H * A.Y_MAX_RATIO;
+    let nav = 0;
+    for (let i = 0; i < es.length; i++) {
+      const e = es[i];
+      if (e.y < 0 || y <= e.y) continue;
+      const tdead = e.speed > 1e-3 ? (killLine - e.y) / e.speed : Infinity;
+      if (tdead <= 0 || tdead >= A.LEAK_HORIZON) continue;   // 打不到了 / 还早
+      const gap = Math.abs(e.x - x);
+      const tgo = gap / CFG.PLAYER.SPEED;                    // 赶过去要多久
+      const doom = Math.pow(1 - tdead / A.LEAK_HORIZON, A.LEAK_CURVE);
+      const reach = Math.max(0, 1 - gap / A.NAV_REACH);
+      const feas = clamp(1 - tgo / Math.max(tdead, 0.05), 0, 1);
+      const v = A.LEAK_SAVE * doom * reach * feas;
+      if (v > nav) nav = v;
+    }
+    gain += nav;
 
     // ---- Boss ----
     if (game.boss && game.boss.entered) {

@@ -32,6 +32,8 @@ verify/_edgeprofile*/
 verify/_check.js
 verify/_shot_*.png
 verify/_zoom_banner.png
+# aitest / browsertest 的原始输出（逐帧日志，一次几 MB，只用于当次排查）
+verify/_*.txt
 desktop/shots/
 desktop/_asar_index.html
 _asar/

@@ -23,6 +23,8 @@
  *   M. random=0.5 → AI 自动模式（开关 / 自动开火 / 主动躲弹（带对照组）/
  *                    手动夺回 / 换枪滞后 / HUD 角标 / 榜单 AI 标记 / 档位跨局保留）
  *   N. coarse=1  → AI 的触屏入口（圆钮开关、文字与点亮状态、布局桩覆盖率）
+ *   O. random=0.5 → AI 的导航与冲刺（主动横穿半屏拦截将漏敌机 + 不紧急时不乱扑的
+ *                    对照组 + 冲刺硬解（用静止弹幕盖满全网格）+ 无解判定非空转）
  */
 const fs = require('fs');
 const path = require('path');
@@ -1214,6 +1216,127 @@ console.log('\n场景 N：AI 的触屏入口');
   G.measureTouchPad();
   check('自检的布局桩已覆盖页面上所有触屏按钮',
         env.undeclaredBtns.length === 0, env.undeclaredBtns.join(', '));
+}
+
+// ============================ 场景 O ============================
+console.log('\n场景 O：AI 的导航与冲刺');
+{
+  const env = createEnv(0.5);
+  const G = env.G, CFG = env.CFG, AI = env.AutoPilot, cls = env.cls();
+  const origSpawning = G.updateSpawning;
+
+  /* ---- 造一个完全确定、完全可控的场面 ----
+     只留一架敌机，并且把它的 x/y/vx/speed 全部钉死。
+     导航是"位置决策"，随机漂移会让断言变成掷骰子 —— 这是本场景能给出
+     硬结论（横移了几百像素）的前提。 */
+  const solo = (ex, ey, espeed) => {
+    G.updateSpawning = () => {};
+    // ⚠️ 必须先 start()：update() 只在 state === 'playing' 时跑，
+    // 少这一步 AI 根本不会被 think()，下面所有断言都会"安静地"失败。
+    G.start();
+    AI.engage(G);
+    G.enemies.length = 0; G.enemyBullets.length = 0;
+    G.bullets.length = 0; G.powerups.length = 0;
+    G.boss = null;
+    G.player.x = 620;
+    G.player.y = CFG.H * 0.85;
+    const e = new cls.Enemy(1);
+    e.elite = false;
+    e.maxHp = 1; e.hp = 1;
+    e.r = CFG.ENEMY.RADIUS;
+    e.x = ex; e.y = ey; e.vx = 0; e.speed = espeed;
+    e.spin = 0; e.hitFlash = 0; e.dead = false;
+    G.enemies.push(e);
+    return e;
+  };
+
+  /** 推进 n 帧，统计冲刺次数（dashCd 一帧内从 0 跳到满冷却就是一次） */
+  const run = (n) => {
+    const x0 = G.player.x, y0 = G.player.y, lives0 = G.player.lives;
+    let dashes = 0, prevCd = G.player.dashCd;
+    for (let i = 0; i < n; i++) {
+      env.step(1);
+      if (G.player.dashCd > prevCd + 0.5) dashes++;
+      prevCd = G.player.dashCd;
+    }
+    return {
+      dxx: x0 - G.player.x, dyy: y0 - G.player.y,
+      lives0, lives: G.player.lives, dashes,
+      dist: Math.abs(G.player.x - 120),
+    };
+  };
+
+  /* ---- O1: 会主动横穿半屏去拦截"快要漏掉"的敌机 ----
+     敌机在左侧远处（x=120）且已经降到 y=320（离击杀下界只剩 220px）。
+     按旧逻辑，AI 只对"正好落在自己头上"的敌机有反应（瞄准核只有 18px 宽），
+     对 500px 外的它完全无感 —— 这就是实测 65% 的命丢在漏怪上的原因。 */
+  solo(120, 320, 100);
+  const nav = run(170);
+  check('AI 会主动横穿半屏去拦截一架快要漏掉的敌机',
+        nav.dxx > 300, '朝它横移了 ' + nav.dxx.toFixed(1) + 'px（起始 x=620，敌机 x=120）');
+  check('拦截过程没有漏怪（命数不变）',
+        nav.lives === nav.lives0, '生命 ' + nav.lives0 + ' → ' + nav.lives);
+  check('一路上真的按了 Shift（冲刺赶路，不是光靠飞）',
+        nav.dashes >= 1, '冲刺 ' + nav.dashes + ' 次');
+
+  /* ---- O2: 对照 —— 不紧急就不该浪费冲刺 ----
+     同样是 x=120，但敌机还在 y=40（距击杀下界 500px，约 5 秒，远在 LEAK_HORIZON 之外）。
+     ⚠️ 这里**不能**断言"AI 原地不动"：瞄准核会让它朝任何能打的敌机靠过去，
+     那是正确行为（它得先走到位才打得到）。真正该证明的是
+     "它知道这架不急" —— 所以断言的是**没有浪费冲刺**：
+     赶路冲刺只在"走过去要吃掉剩余可击杀时间的一半以上"时才用。 */
+  solo(120, 40, 100);
+  const idle = run(60);
+  check('对照组：不紧急的敌机，AI 会靠过去瞄准，但不会为此烧掉冲刺',
+        idle.dashes === 0, '移动 ' + idle.dxx.toFixed(1) + 'px ・ 冲刺 ' + idle.dashes + ' 次');
+
+  /* ---- O3: 冲刺的第一种用途 —— 硬解 ----
+     用一圈**静止**的敌弹把 5 条候选行全部盖住（vy=0 的弹会走"瞬时威胁"分支，
+     危险度恒为 7.69），于是整张网格无解 → 必须靠冲刺的无敌帧扛。
+     对照组（AI 关闭）同样的弹幕下不会冲刺。 */
+  const wall = () => {
+    G.updateSpawning = () => {};
+    G.start();
+    G.enemies.length = 0; G.enemyBullets.length = 0; G.bullets.length = 0;
+    G.player.x = CFG.W / 2;
+    G.player.y = CFG.H * 0.85;
+    for (let r = 0; r < 5; r++) {
+      const y = CFG.H * CFG.AI.Y_MIN_RATIO
+        + (CFG.H * (CFG.AI.Y_MAX_RATIO - CFG.AI.Y_MIN_RATIO)) * r / 4;
+      for (let x = 20; x <= CFG.W - 20; x += 36) {
+        G.enemyBullets.push(new cls.EnemyBullet(x, y, 0, 0, '#ffffff'));
+      }
+    }
+    // 每一行都探一下：只探一处会漏掉"其实还有一条安全行"的情况
+    let minDanger = Infinity;
+    for (let r = 0; r < 5; r++) {
+      const y = CFG.H * CFG.AI.Y_MIN_RATIO
+        + (CFG.H * (CFG.AI.Y_MAX_RATIO - CFG.AI.Y_MIN_RATIO)) * r / 4;
+      minDanger = Math.min(minDanger, AI._danger(G, CFG.W / 2, y));
+    }
+    return { minDanger };
+  };
+
+  const w1 = wall();
+  check('弹幕造出的局面确实"无处可躲"（每一行都超过 DASH_AT，否则这条测试是空转的）',
+        w1.minDanger >= CFG.AI.DASH_AT,
+        '最安全的一行危险度 ' + w1.minDanger.toFixed(2) + ' ≥ 阈值 ' + CFG.AI.DASH_AT);
+
+  wall();
+  AI.disengage(G, 'toggle');
+  env.step(3);
+  check('对照组：AI 关闭时不会自己冲刺', G.player.dashCd === 0,
+        'dashCd = ' + G.player.dashCd.toFixed(2));
+
+  wall();
+  AI.engage(G);
+  env.step(3);
+  check('无处可躲时 AI 会用冲刺的无敌帧硬解（这是它按 Shift 的两种情形之一）',
+        G.player.dashCd > 0.5, 'dashCd = ' + G.player.dashCd.toFixed(2));
+
+  G.updateSpawning = origSpawning;
+  G.enemies.length = 0; G.enemyBullets.length = 0;
+  AI.disengage(G, 'toggle');
 }
 
 console.log(fail === 0
