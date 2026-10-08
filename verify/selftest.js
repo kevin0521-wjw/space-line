@@ -18,6 +18,8 @@
  *   I. random=0.5 → 多武器系统（双列 / 激光解锁切换、激光按 dt 结算伤害、穿透）
  *   J. random=0.5 → BOSS 三阶段（阈值、扇形弹数、狂暴环形弹幕、阶段清弹）
  *   K. store 预置 → 本地排行榜 Top5（排序 / 截断 / 名次 / 旧存档迁移 / 脏数据清洗）
+ *   L. random=0.5 → 二倍速模式（档位切换 / 时间真的翻倍 / 步长仍被夹紧 /
+ *                    HUD 角标 / 榜单 ×2 标记 / 真实存活计时 / 触屏按钮 / HUD 让位高度）
  */
 const fs = require('fs');
 const path = require('path');
@@ -54,13 +56,19 @@ function createEnv(randomValue, opts = {}) {
   const els = new Map();
   const store = Object.assign({}, opts.store || {});
 
-  /* 布局桩：画布按 800×600 撑满，触屏按钮 62×62。
-     数值必须"像真的"，因为 measureTouchPad 会拿它们反算 HUD 上抬高度 ——
-     给 0 的话这条链路会被静默跳过（函数里有 `if (!(bh > 0)) return`），
-     测试就变成永远通过。 */
-  const rectOf = (id) => (id === 'game'
-    ? { x: 0, y: 0, top: 0, left: 0, width: 800, height: 600 }
-    : { x: 0, y: 0, top: 0, left: 0, width: 62, height: 62 });
+  /* 布局桩：画布按 800×600 撑满，触屏按钮 62×62，并按真实 CSS 排布。
+     ⚠️ 按钮的 top 不能一律填 0。measureTouchPad 是拿"按钮顶边到画布底边"
+     的距离反算 HUD 让位高度的，top 全填 0 会算出一个远大于真实值的数 ——
+     这个函数看起来在跑、实际量的是假数据，等于没测。 */
+  const BTN = 62;
+  const btnTop = 600 - 14 - BTN;   // 底部一行：bottom 14px + 按钮高 62px
+  const rectOf = (id) => {
+    if (id === 'game') return { x: 0, y: 0, top: 0, left: 0, width: 800, height: 600 };
+    if (id === 'touch-weapon') return { x: 14, y: btnTop, top: btnTop, left: 14, width: BTN, height: BTN };
+    if (id === 'touch-speed')  return { x: 86, y: btnTop, top: btnTop, left: 86, width: BTN, height: BTN };
+    if (id === 'touch-dash')   return { x: 724, y: btnTop, top: btnTop, left: 724, width: BTN, height: BTN };
+    return { x: 0, y: 0, top: 0, left: 0, width: BTN, height: BTN };
+  };
 
   const makeEl = (id) => {
     const cls = new Set();
@@ -857,6 +865,149 @@ console.log('\n场景 K：本地排行榜 Top 5');
     envC.G.recordScore();
   } catch (err) { crashed = true; }
   check('隐私模式/配额超限下读写存档不崩溃（静默降级）', !crashed);
+}
+
+// ============================ 场景 L ============================
+console.log('\n场景 L：二倍速模式');
+{
+  const env = createEnv(0.5);
+  const G = env.G, CFG = env.CFG, S = CFG.SPEED;
+  env.step(2);
+
+  check('开局为常速', G.timeScale === S.NORMAL, 'timeScale = ' + G.timeScale);
+
+  // 档位开关不做状态限制：在开始界面先把档位设好再开局是正常用法
+  env.dispatch('keydown', 'f');
+  env.step(1);
+  check('开始界面上按 F 也能切档', G.timeScale === S.FAST);
+  env.dispatch('keydown', 'f');
+  env.step(1);
+  check('再按 F 切回常速', G.timeScale === S.NORMAL);
+
+  env.dispatch('keydown', ' ');
+  env.step(1);
+  env.dispatch('keydown', 'f');
+  env.step(1);
+  check('游戏中按 F 切到二倍速', G.timeScale === S.FAST);
+
+  /* ---- 时间真的被放大了吗 ----
+     关键：绝不能只断言 timeScale 这个字段。字段写对了、但 frame() 里忘了用它
+     （或者用错了顺序），恰恰是"改一处漏一处"这类改动最容易留下的问题。
+     所以这里量的是"同样 60 个真实帧里，游戏时间走了多少"。 */
+  const e0 = G.elapsed, r0 = G.realElapsed;
+  env.step(60);
+  const dGame = G.elapsed - e0;
+  const dReal = G.realElapsed - r0;
+  check('二倍速期间游戏仍在进行（下面的计时断言才有意义）', G.state === 'playing');
+  check('游戏内时间流速确实是 2 倍', Math.abs(dGame - 2 * dReal) < 0.02,
+        '游戏 +' + dGame.toFixed(3) + 's / 真实 +' + dReal.toFixed(3) + 's');
+  check('真实存活计时不受倍速影响（结算里不能说假话）',
+        Math.abs(dReal - 1.0) < 0.02, '真实 +' + dReal.toFixed(3) + 's（期望 1.000s）');
+
+  /* ---- 逻辑步长必须仍被 MAX_DT 夹住 ----
+     如果缩放发生在夹紧之前，最大步长会变成 1/15 秒，高速子弹一帧能跨 40 像素，
+     可能整个跳过敌机的碰撞圆 —— 那会表现为"二倍速偶尔打不中"的玄学 bug。 */
+  let maxStep = 0;
+  const origUpdate = G.update.bind(G);
+  G.update = (dt) => { if (dt > maxStep) maxStep = dt; return origUpdate(dt); };
+  env.step(10);
+  G.update = origUpdate;
+  check('二倍速下逻辑步长仍被 MAX_DT 夹住（防隧道效应）',
+        maxStep <= CFG.MAX_DT + 1e-9,
+        '实测最大步长 ' + maxStep.toFixed(5) + 's ≤ ' + CFG.MAX_DT.toFixed(5) + 's');
+
+  // ---- HUD 角标 ----
+  env.clear();
+  env.step(1);
+  check('二倍速时 HUD 显示 ×2 角标', env.fillTexts.indexOf(S.TAG) >= 0);
+  check('SCORE 那一行没有被拼进倍速标记（自检靠它反解分数）',
+        env.score() !== null, 'score = ' + env.score());
+
+  env.dispatch('keydown', 'f');     // 切回常速
+  env.step(1);
+  env.clear();
+  env.step(1);
+  check('常速时不显示角标', env.fillTexts.indexOf(S.TAG) < 0);
+
+  /* ---- 榜单：加速局必须带标记 ----
+     不标的话，"×2 打出来的分"和"常速打出来的分"混在同一张榜上，
+     这张榜就失去了可比性 —— 而排行版本来的意义就是可比。 */
+  G.timeScale = S.FAST;
+  G.score = 4321;
+  G.realElapsed = 12.3;
+  G.gameOver();                      // 走真实路径：recordScore + 刷新覆盖层
+
+  const saved = JSON.parse(env.store['space-line-scores'] || '[]');
+  check('加速局的成绩被记录为 sp=2', saved.length > 0 && saved[0].sp === S.FAST,
+        JSON.stringify(saved[0]));
+  check('结算界面标注了本局是二倍速', env.el('ov-stats').innerHTML.indexOf('二倍速') >= 0);
+  check('榜单把倍速标记渲染出来', env.el('ov-board').innerHTML.indexOf('class="sp"') >= 0);
+
+  // ---- 脏数据：sp 只认 2 ----
+  const cleaned = G.sanitizeScores([
+    { score: 100, sp: 2 },
+    { score: 90, sp: 999 },
+    { score: 80, sp: 'x' },
+    { score: 70 }
+  ]);
+  check('sp 只认 2，被篡改的值一律归为常速',
+        cleaned[0].sp === S.FAST && cleaned[1].sp === S.NORMAL &&
+        cleaned[2].sp === S.NORMAL && cleaned[3].sp === S.NORMAL,
+        cleaned.map((e) => e.sp).join(' / '));
+
+  // ---- 档位跨局保留 ----
+  G.timeScale = S.FAST;
+  G.start();
+  check('重开一局后仍保持二倍速档位（它是难度档位，不是本局状态）',
+        G.timeScale === S.FAST);
+  check('重开一局后真实存活计时归零', G.realElapsed === 0);
+}
+
+// ---- 触屏：倍速按钮 ----
+{
+  const env = createEnv(0.5, { coarse: true, touchPoints: 5 });
+  const G = env.G, S = env.CFG.SPEED;
+  env.step(3);
+
+  check('触屏模式出现倍速按钮', !!env.el('touch-speed'));
+  env.dispatch('keydown', ' ');
+  env.step(1);
+
+  env.el('touch-speed').fire('pointerdown', { preventDefault() {} });
+  env.step(1);
+  check('屏幕倍速按钮能切档', G.timeScale === S.FAST);
+  check('按钮文字跟着档位变成 ×2',
+        env.el('touch-speed-text').textContent === S.TAG,
+        '文字 = ' + env.el('touch-speed-text').textContent);
+  check('开到二倍速时按钮点亮（.on）',
+        env.el('touch-speed').classList.contains('on') === true);
+
+  env.el('touch-speed').fire('pointerdown', { preventDefault() {} });
+  env.step(1);
+  check('再按一次回到常速：档位、文字、点亮状态一起复位',
+        G.timeScale === S.NORMAL &&
+        env.el('touch-speed-text').textContent === '1×' &&
+        env.el('touch-speed').classList.contains('on') === false);
+
+  /* ---- 回归：让位高度必须按"整摞按钮"算，而不是只看某一颗 ----
+     这个 bug 真发生过：倍速按钮一度叠在换枪按钮正上方，而 measureTouchPad
+     只量了冲刺按钮的高度，算出的让位高度不够 ——
+     结果倍速按钮正好压住左下角 WEAPON 那一行字，而且不报任何错。
+     手法：临时把倍速按钮的矩形挪高一格（模拟叠放），让位高度必须跟着变大。 */
+  const speedEl = env.el('touch-speed');
+  const realRect = speedEl.getBoundingClientRect;
+  G.measureTouchPad();
+  const rowPad = G.hudBottomPad;
+  speedEl.getBoundingClientRect = () => ({ x: 14, y: 452, top: 452, left: 14, width: 62, height: 62 });
+  G.measureTouchPad();
+  const stackedPad = G.hudBottomPad;
+  speedEl.getBoundingClientRect = realRect;
+  G.measureTouchPad();
+  check('按钮叠放时底部 HUD 会自动让出更多空间（按整摞算，不是单颗）',
+        stackedPad > rowPad,
+        '叠放 ' + stackedPad + 'px > 单排 ' + rowPad + 'px');
+  check('单排布局下让位高度回到原值（+20 呼吸空间，未重复计算下边距）',
+        G.hudBottomPad === rowPad, 'pad=' + G.hudBottomPad + 'px');
 }
 
 console.log(fail === 0

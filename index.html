@@ -285,6 +285,9 @@
   }
   #ov-board .brow .rk{ color: #55799a; width: 1.6em; }
   #ov-board .brow .sc{ color: #8fe3ff; flex: 1; }
+  /* 二倍速标记：琥珀色，与普通成绩区分开。用 ×2 而不是文字，
+     因为榜单是等宽字体的紧凑列表，一个符号比"二倍速"三个字省地儿也更快读。 */
+  #ov-board .brow .sc .sp{ color: #ffb457; margin-left: 6px; font-size: .86em; }
   #ov-board .brow .meta{ color: #476b8a; font-size: .92em; }
   /* 本局排名高亮：玩家一眼就能在榜上找到自己刚才那一次 */
   #ov-board .brow.now .rk,
@@ -339,6 +342,21 @@
   #touch-weapon:active{ background: rgba(180, 140, 255, .3); }
   /* 还没解锁第二把武器：按钮变暗表示"按了也没用" */
   #touch-weapon.dim{ border-color: rgba(85, 121, 154, .4); color: #6b86a3; }
+  /* 倍速按钮：排在换枪按钮右边（14 + 62 + 10 = 86），与它同处底部一行。
+     ⚠️ 曾经把它叠在换枪按钮正上方（bottom: 86），结果是它压住了左下角的
+     WEAPON 那一行 HUD —— 手机上的画布只有约 275 CSS 像素高，纵向叠两个
+     62px 的按钮要吃掉 54% 的高度，屏幕又矮、HUD 又没地方去。
+     排成一行就没有这个问题：底部 HUD 的让位高度只需按"一行按钮"算。
+     它刻意不放在两个拇指的热区（左下换枪 / 右下冲刺）里 ——
+     倍速是整局只按一两次的档位开关，混在热区里会被误触，而后果是整局节奏突变。 */
+  #touch-speed{ left: 86px; }
+  #touch-speed:active{ background: rgba(255, 180, 87, .3); }
+  /* 已开到二倍速：点亮成琥珀色，余光扫一眼就能确认当前档位 */
+  #touch-speed.on{
+    border-color: rgba(255, 180, 87, .85);
+    color: #ffb457;
+    background: rgba(255, 180, 87, .16);
+  }
 
   /* 覆盖层必须盖在触屏按钮之上，否则暂停/结束时按钮还能被按到 */
   #overlay{ z-index: 10; }
@@ -363,6 +381,7 @@
         <kbd>空格</kbd> 射击 ·
         <kbd>Shift</kbd> 冲刺 ·
         <kbd>Q</kbd> 换枪 ·
+        <kbd>F</kbd> 二倍速 ·
         <kbd>P</kbd> 暂停 ·
         <kbd>R</kbd> 重开
       </p>
@@ -375,6 +394,10 @@
       </button>
       <button id="touch-dash" class="tbtn" type="button">
         <span id="touch-dash-text">冲刺</span><small>Shift</small>
+      </button>
+      <!-- 倍速开关：位置在换枪按钮上方，故意避开两个拇指的主战场（见 CSS 注释） -->
+      <button id="touch-speed" class="tbtn" type="button">
+        <span id="touch-speed-text">1×</span><small>倍速 F</small>
       </button>
     </div>
   </div>
@@ -404,6 +427,20 @@ const CFG = {
   // 不夹紧会让飞船和敌人一瞬间"瞬移"穿过碰撞检测（俗称隧道效应）。
   // 1/30 秒 ≈ 保底 30FPS 的逻辑步长，既不会瞬移，也不会让游戏变得像慢动作。
   MAX_DT: 1 / 30,
+
+  /* ---------- 二倍速模式 ----------
+     把"整局节奏加快一倍"做成一个可随时开关的档位。
+     实现上只在 frame() 里对 dt 缩放一次就够了：敌机、子弹、冷却、难度计时、
+     道具倒计时全部吃同一个 dt，所以不存在"某个系统忘了加速"的可能。
+     玩家拿到的是"同样的真实时长里打两倍的内容"，代价是反应窗口直接砍半。
+     ⚠️ 只给整数档，不做 1.5x 这类连续调速：非整数倍玩家根本判断不出
+     "到底是世界变快了，还是我自己手慢了"，反馈会变得不可信。 */
+  SPEED: {
+    NORMAL: 1,           // 普通档
+    FAST: 2,             // 二倍速档
+    TAG: '×2'            // 排行榜上的标记。加速局和普通局的分数若混在同一张榜上
+                         // 而不加区分，这个榜就不再具备可比性 —— 所以必须有标记
+  },
 
   /* ---------- 屏幕反馈（震动）----------
      ⚠️ 这几个键曾经只在 addShake()/render() 里被引用，却没有在这里定义。
@@ -2702,6 +2739,18 @@ const Game = {
   touchMode: false,  // 是否处于触屏模式（决定要不要显示屏幕按钮、HUD 要不要让位）
   hudBottomPad: 0,   // 触屏模式下底部 HUD 需要上抬的逻辑像素（由 measureTouchPad 算出）
 
+  // ---- 二倍速档位 ----
+  // 做成"跨局保留"的模式，而不是每局重置：它相当于一个难度档位，
+  // 玩家开了二倍速就是打算一直这么打，每局都要重新按一次只会很烦。
+  // 由此带来的风险（加速局刷出更高的分）由榜上的 ×2 标记兜住 —— 见 recordScore。
+  timeScale: 1,
+
+  // ---- 真实存活秒数 ----
+  // 为什么不能直接用 elapsed：elapsed 吃的是缩放后的 dt，它驱动难度等级，
+  // 属于"游戏世界内的时间"。二倍速下打 30 秒真实时间，elapsed 会走到 60。
+  // 结算界面上写"存活 60.0s"对玩家就是一句假话，所以另存一个不缩放的计时。
+  realElapsed: 0,
+
   /* ==========================================================================
    * 初始化：只做一次
    * ========================================================================== */
@@ -2788,8 +2837,10 @@ const Game = {
     this.wrap = document.getElementById('game-wrap');
     this.touchDash = document.getElementById('touch-dash');
     this.touchWeapon = document.getElementById('touch-weapon');
+    this.touchSpeed = document.getElementById('touch-speed');
     this.touchDashText = document.getElementById('touch-dash-text');
     this.touchWeaponText = document.getElementById('touch-weapon-text');
+    this.touchSpeedText = document.getElementById('touch-speed-text');
 
     // 按钮点击：先 blur() 再处理。
     // 为什么必须 blur：按钮被点击后会获得焦点，之后按空格浏览器会
@@ -2844,7 +2895,23 @@ const Game = {
     // 夹紧上限，防止切后台回来后"瞬移穿模"
     dt = Math.min(dt, CFG.MAX_DT);
 
-    this.update(dt);
+    // 真实存活计时用未缩放的 dt，这样二倍速下的"存活秒数"仍是玩家手腕上的秒数
+    if (this.state === 'playing') this.realElapsed += dt;
+
+    // ---- 二倍速：全局唯一一处时间缩放 ----
+    // 只在进行中生效。菜单 / 暂停 / 结算界面上也让星空加速的话，
+    // 会出现"待机画面自己越飞越快"这种说不通的观感。
+    // ⚠️ 缩放之后必须再夹一次 MAX_DT。若省掉这一步，最大逻辑步长会翻倍到
+    //    1/15 秒，高速子弹一帧就能跨 40 像素，可能直接跳过敌机的碰撞圆
+    //    （隧道效应）；那样二倍速就会变成一个"偶尔打不中"的玄学 bug。
+    //    代价是帧率掉到 30 以下时二倍速会自动衰减回一倍速 ——
+    //    宁可不加速，也不能让碰撞检测漏判。
+    let step = dt;
+    if (this.state === 'playing' && this.timeScale !== CFG.SPEED.NORMAL) {
+      step = Math.min(dt * this.timeScale, CFG.MAX_DT);
+    }
+
+    this.update(step);
     this.render();
     // 触屏按钮的冷却显示跟着帧走（内部有变化检测，不会每帧写 DOM）
     this.syncTouchUI();
@@ -3952,6 +4019,17 @@ const Game = {
     ctx.fillText('SCORE ' + String(this.score).padStart(6, '0'), 18, 14);
     ctx.shadowBlur = 0;
 
+    // ---- 二倍速角标：紧跟在分数右侧 ----
+    // 为什么是常驻角标而不是只在切档时弹横幅：
+    // 档位是持续生效的状态，玩家在结算时看到分数明显偏高，
+    // 必须有一个一直都在的线索能解释"为什么"，否则会怀疑是计分出了 bug。
+    // 单独一次 fillText，不拼进上面那行 —— 自检靠 /^SCORE (\d+)$/ 反解分数。
+    if (this.timeScale === CFG.SPEED.FAST) {
+      ctx.font = '700 16px Consolas, "Courier New", monospace';
+      ctx.fillStyle = '#ffb457';
+      ctx.fillText(CFG.SPEED.TAG, 190, 18);
+    }
+
     ctx.font = '12px Consolas, "Courier New", monospace';
     ctx.fillStyle = '#6f9dc0';
     ctx.fillText('BEST  ' + String(this.best).padStart(6, '0'), 18, 42);
@@ -4167,7 +4245,12 @@ const Game = {
   reset() {
     this.score = 0;
     this.elapsed = 0;
+    this.realElapsed = 0;
     this.level = 1;
+
+    // ⚠️ 这里刻意不重置 timeScale。
+    // 二倍速是"难度档位"而不是"本局状态"，重开一局后保持玩家选定的档位；
+    // 每局都要重新按一次 F 只会让人烦。想回常速随时按一下即可。
 
     // 用 length = 0 清空数组而不是重新赋值：保持数组引用不变，
     // 万一有其他代码持有引用也不会指向一个"废弃的旧数组"
@@ -4239,6 +4322,14 @@ const Game = {
       return;
     }
 
+    // F：切换二倍速（Fast）。
+    // 刻意不做状态限制 —— 它是档位开关而不是一次性动作，
+    // 在开始界面先设好"这局我要打二倍速"再开局是正常用法。
+    if (k === 'f') {
+      this.toggleSpeed();
+      return;
+    }
+
     // Q / Tab：循环切换已解锁武器。
     // 用"循环"而不是"三选一"，是因为手机上只有一个换枪按钮，
     // 键盘和触摸必须共用同一套逻辑，否则两边的手感会不一致。
@@ -4275,6 +4366,28 @@ const Game = {
     // 否则高速度下位移太快，反而分不清自己有没有真的冲成功。
     this.spark(p.x, p.y, '#7fe8ff', 14);
     this.shockwaves.push(new Shockwave(p.x, p.y, 56, '#7fe8ff', 0.28));
+  },
+
+  /**
+   * 切换二倍速档位（键盘 F 与屏幕按钮共用这一条路径）。
+   * 不做状态限制：档位开关在菜单里预设好再开局是完全合理的用法。
+   * @returns {number} 切换后的档位（1 或 2）
+   */
+  toggleSpeed() {
+    const S = CFG.SPEED;
+    this.timeScale = (this.timeScale === S.FAST) ? S.NORMAL : S.FAST;
+
+    // 切档时给一次横幅反馈。为什么不能只靠 HUD 角标：
+    // 角标是常驻的静态信息，玩家按下 F 之后如果没有"刚发生了什么"的即时确认，
+    // 很容易怀疑自己到底按上没有，然后反复去按。
+    // 提示只在进行中弹 —— 菜单界面上那个位置被覆盖层压着，弹了也看不见。
+    if (this.state === 'playing') {
+      this.showBanner('SPEED ' + S.TAG,
+                      this.timeScale === S.FAST ? '二倍速 · 反应窗口减半' : '恢复常速',
+                      1.1,
+                      this.timeScale === S.FAST ? '#ffb457' : '#7fe8ff');
+    }
+    return this.timeScale;
   },
 
   /**
@@ -4348,9 +4461,14 @@ const Game = {
       // 连击、武器、Boss 都是新增的目标维度，所以也放进结算里 ——
       // 只报总分的话，玩家没有动力去追"不断连"和"打通 Boss"。
       this.ovStats.innerHTML =
-        '本局得分 <b>' + this.score + '</b> · 存活 <b>' + this.elapsed.toFixed(1) + 's</b>' +
+        '本局得分 <b>' + this.score + '</b> · 存活 <b>' + this.realElapsed.toFixed(1) + 's</b>' +
         ' · 到达 <b>Lv.' + this.level + '</b>' +
         (this.bossIndex > 0 ? ' · 击破 BOSS <b>' + this.bossIndex + '</b>' : '') +
+        // 加速局必须在结算里点明：分数偏高、等级偏高、存活时间却没变长，
+        // 不解释一句的话，玩家第一反应会是"计分是不是坏了"
+        (this.timeScale === CFG.SPEED.FAST
+          ? ' · <b style="color:#ffb457">二倍速 ' + CFG.SPEED.TAG + '</b>'
+          : '') +
         '<br>' +
         // 进了榜就明确报出名次：这是排行榜最核心的反馈，不说出来等于没做
         (this.lastRank > 0
@@ -4391,7 +4509,7 @@ const Game = {
     // "一条没有细节的历史记录"塞进榜单 —— 否则老玩家一更新就会发现
     // 排行榜是空的，看起来像记录被清掉了。
     if (list.length === 0 && best > 0) {
-      list = [{ score: best, level: 0, elapsed: 0, ts: 0 }];
+      list = [{ score: best, level: 0, elapsed: 0, ts: 0, sp: CFG.SPEED.NORMAL }];
     }
 
     this.scores = list;
@@ -4402,7 +4520,7 @@ const Game = {
   /**
    * 清洗排行榜数据。
    * @param {Array} arr 从 localStorage 读到的原始数组
-   * @returns {Array<{score:number,level:number,elapsed:number,ts:number}>}
+   * @returns {Array<{score:number,level:number,elapsed:number,ts:number,sp:number}>}
    * 为什么必须清洗：localStorage 里的内容是玩家随手就能改的，也可能被旧版本
    * 写坏。少这一步的话，一条 score 为字符串或 NaN 的记录会让排序退化成
    * 随机顺序，NaN 还会一路污染到 HUD 的 padStart，最后显示成 "NaN"。
@@ -4419,11 +4537,16 @@ const Game = {
       const level = Math.floor(Number(e.level));
       const elapsed = Number(e.elapsed);
       const ts = Number(e.ts);
+      // 倍速档位只认"恰好等于 FAST"，其余一律归为常速。
+      // 不能写 (e.sp || 1)：改过存档的人塞个 999 进来，榜单上就会多出一个
+      // 无法解释的"×999"，而清洗环节的价值恰恰在于不信任存档内容。
+      const sp = Number(e.sp) === CFG.SPEED.FAST ? CFG.SPEED.FAST : CFG.SPEED.NORMAL;
       out.push({
         score: score,
         level: (isFinite(level) && level > 0) ? level : 0,
         elapsed: (isFinite(elapsed) && elapsed > 0) ? elapsed : 0,
-        ts: (isFinite(ts) && ts > 0) ? ts : 0
+        ts: (isFinite(ts) && ts > 0) ? ts : 0,
+        sp: sp
       });
     }
     out.sort((a, b) => b.score - a.score);
@@ -4438,8 +4561,13 @@ const Game = {
     const entry = {
       score: this.score,
       level: this.level,
-      elapsed: Math.round(this.elapsed * 10) / 10,
-      ts: Date.now()
+      // 存真实存活秒数（不是吃缩放 dt 的 elapsed），这样榜单上的时长
+      // 在普通局和加速局之间仍然是同一个单位，可以直接横向比较。
+      elapsed: Math.round(this.realElapsed * 10) / 10,
+      ts: Date.now(),
+      // 记录本局的倍速档位：榜单允许两种档位混排，但必须能一眼分辨，
+      // 否则"×2 打出来的分"和"常速打出来的分"混在一起，这张榜就失去可比性。
+      sp: this.timeScale === CFG.SPEED.FAST ? CFG.SPEED.FAST : CFG.SPEED.NORMAL
     };
 
     this.scores.push(entry);
@@ -4491,9 +4619,15 @@ const Game = {
       const meta = e.level > 0
         ? 'Lv.' + e.level + ' · ' + e.elapsed.toFixed(1) + 's'
         : '历史记录';
+      // 倍速标记紧贴在分数后面（放进 .sc 单元格里，而不是另起一列）：
+      // .sc 是 flex:1 会把右侧撑开，标记若单独成列就会飘到离分数很远的地方，
+      // 读起来不再像"这个分数"的注脚。
+      const spTag = e.sp === CFG.SPEED.FAST
+        ? '<span class="sp">' + CFG.SPEED.TAG + '</span>'
+        : '';
       html += '<div class="brow' + now + '">' +
                 '<span class="rk">' + (i + 1) + '</span>' +
-                '<span class="sc">' + e.score + '</span>' +
+                '<span class="sc">' + e.score + spTag + '</span>' +
                 '<span class="meta">' + meta + '</span>' +
               '</div>';
     }
@@ -4559,6 +4693,17 @@ const Game = {
         if (this.state === 'playing') this.switchWeapon(null);
       }, { passive: false });
     }
+
+    // ---- 倍速按钮 ----
+    // 与换枪/冲刺不同，这里不限制 state：档位开关在开始/结算界面上也能按，
+    // 玩家可以先设好档位再开局。这样键盘 F 和屏幕按钮的行为完全一致。
+    if (this.touchSpeed) {
+      this.touchSpeed.addEventListener('pointerdown', (ev) => {
+        ev.preventDefault();
+        this.touchSpeed.blur();
+        this.toggleSpeed();
+      }, { passive: false });
+    }
   },
 
   /**
@@ -4566,19 +4711,42 @@ const Game = {
    * @returns {void}
    * 只在初始化与 resize 时算，绝不在每帧算：每帧读 getBoundingClientRect()
    * 会强制浏览器做同步重排（layout thrashing），在手机上足够吃掉十几帧。
+   *
+   * ⚠️ 必须取"所有按钮里最高的那条顶边"，而不是只量某单颗按钮的高度。
+   *    这个坑是实拍截图里看出来的：倍速按钮一度叠在换枪按钮正上方，
+   *    而这里只量了冲刺按钮 —— 于是算出的让位高度不够，
+   *    倍速按钮正好压在左下角的 WEAPON 那一行字上（字被盖住，还不报任何错）。
+   *    改成"取整摞按钮的最高顶边"之后，以后无论怎么加按钮、怎么叠，
+   *    让位高度都会自动跟上，不必再回头改这个公式。
    */
   measureTouchPad() {
-    if (!this.canvas || !this.touchDash) return;
+    if (!this.canvas) return;
     // 精简沙箱（无布局引擎）里 canvas 没有 getBoundingClientRect，
     // 量不出来就保持 0，HUD 位置退回默认值即可 —— 这不是错误路径。
     if (typeof this.canvas.getBoundingClientRect !== 'function') return;
     const cr = this.canvas.getBoundingClientRect();
     if (!cr || cr.height <= 0) return;
-    if (typeof this.touchDash.getBoundingClientRect !== 'function') return;
-    const bh = this.touchDash.getBoundingClientRect().height;
-    if (!(bh > 0)) return;
-    // +34 = 按钮下边距(14) + 一点呼吸空间，避免 HUD 文字紧贴按钮
-    this.hudBottomPad = Math.round((bh + 34) / cr.height * CFG.H);
+
+    // 画布底边。用 top + height 而不是 cr.bottom：
+    // 精简环境（自检桩）只给 top/height，读 bottom 会得到 undefined → NaN。
+    const canvasBottom = cr.top + cr.height;
+    const btns = [this.touchWeapon, this.touchSpeed, this.touchDash];
+
+    let need = 0;   // 按钮从画布底边往上顶起的高度（CSS 像素）
+    for (let i = 0; i < btns.length; i++) {
+      const el = btns[i];
+      if (!el || typeof el.getBoundingClientRect !== 'function') continue;
+      const r = el.getBoundingClientRect();
+      if (!(r.width > 0 && r.height > 0)) continue;
+      const up = canvasBottom - r.top;
+      if (up > need) need = up;
+    }
+    if (!(need > 0)) return;
+
+    // +20 = 呼吸空间，避免 HUD 文字紧贴按钮。
+    // 注意 need 里已经含了按钮自身的下边距（bottom: 14px），不要再加一遍 ——
+    // 单排按钮时 need = 14 + 62 = 76，加 20 得 96，与改造前的取值完全一致。
+    this.hudBottomPad = Math.round((need + 20) / cr.height * CFG.H);
   },
 
   /**
@@ -4610,6 +4778,19 @@ const Game = {
       this.touchWeaponText.textContent = wname;
       // 只有一把枪时按钮变暗，玩家一眼知道"现在按了也没用"
       this.touchWeapon.classList.toggle('dim', p.weapons.length <= 1);
+    }
+
+    // 倍速按钮同理：档位是常驻状态，按钮上直接写着当前是几倍，
+    // 玩家不必去盯右上角的小角标。同样只在变化时写 DOM。
+    const fast = this.timeScale === CFG.SPEED.FAST;
+    const slabel = fast ? CFG.SPEED.TAG : '1×';
+    if (slabel !== this._speedLabel && this.touchSpeedText) {
+      this._speedLabel = slabel;
+      this.touchSpeedText.textContent = slabel;
+    }
+    if (fast !== this._speedOn && this.touchSpeed) {
+      this._speedOn = fast;
+      this.touchSpeed.classList.toggle('on', fast);
     }
   }
 };

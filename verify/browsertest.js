@@ -4,7 +4,8 @@
  * 分两个阶段，因为"桌面"和"触屏"在同一个页面里是两套分支，必须分别起一次：
  *   阶段一（桌面）—— 键盘开局/移动/暂停、激光武器、BOSS 三阶段、排行榜迁移
  *   阶段二（触屏）—— 用真实触摸事件（Input.dispatchTouchEvent）驱动
- *                    相对拖动、自动开火、屏幕冲刺按钮
+ *                    相对拖动、自动开火、屏幕冲刺按钮、倍速按钮、
+ *                    以及三个按钮两两不重叠 / 底部 HUD 让位高度是否真的够
  *
  * 为什么非要走真浏览器：verify/selftest.js 用的是自搭的 DOM/Canvas 桩，
  * 它能证明"逻辑对了"，但证明不了"画布缩放后坐标还是对的""按钮真的能按到"
@@ -269,6 +270,49 @@ const check = (label, ok, extra = '') => {
         (await evaluate('__SpaceLine.game.hudBottomPad')) > 0,
         'pad=' + (await evaluate('__SpaceLine.game.hudBottomPad')) + 'px');
 
+  // ---- 三个屏幕按钮的真实布局 ----
+  // selftest 用的是自搭的 DOM 桩（矩形是写死的），所以"按钮之间会不会互相压住"
+  // 这件事只有真实布局引擎才算得出来。
+  const speedLayout = await evaluate(`(function(){
+    var ids=['touch-weapon','touch-speed','touch-dash'];
+    var rs=ids.map(function(i){return document.getElementById(i).getBoundingClientRect();});
+    for (var i=0;i<rs.length;i++){
+      if (rs[i].width<40||rs[i].height<40)
+        return ids[i]+" 尺寸异常 " + Math.round(rs[i].width) + "x" + Math.round(rs[i].height);
+      if (rs[i].top<0||rs[i].left<0) return ids[i]+" 跑到视口外";
+    }
+    for (var a=0;a<rs.length;a++)for(var b=a+1;b<rs.length;b++){
+      var A=rs[a],B=rs[b];
+      if (A.left<B.right && B.left<A.right && A.top<B.bottom && B.top<A.bottom)
+        return ids[a]+" 与 "+ids[b]+" 重叠";
+    }
+    return "ok";
+  })()`);
+  check('三个屏幕按钮尺寸正常且两两不重叠', speedLayout === 'ok', speedLayout);
+
+  /* ---- 底部 HUD 的让位高度是否真的够 ----
+     这一条是为一个实拍截图里发现的 bug 立的：倍速按钮叠在换枪按钮上方时，
+     measureTouchPad 只量了冲刺按钮，算出的让位高度不够，
+     倍速按钮正好压住左下角 WEAPON 那一行字 —— 而且不报任何错。
+     所以这里把"按钮顶边到画布底边"换算成逻辑像素，直接和 hudBottomPad 比。 */
+  const C = JSON.parse(await evaluate(`(function(){
+    var G=__SpaceLine.game;
+    var c=document.getElementById("game").getBoundingClientRect();
+    var need=0;
+    ["touch-weapon","touch-speed","touch-dash"].forEach(function(i){
+      var up=(c.top+c.height)-document.getElementById(i).getBoundingClientRect().top;
+      if (up>need) need=up;
+    });
+    return JSON.stringify({
+      needLogical:Math.round(need/c.height*600),
+      pad:G.hudBottomPad,
+      canvasH:Math.round(c.height)
+    });
+  })()`));
+  check('底部 HUD 的让位高度真的盖过了按钮顶边（截图里压字那个 bug）',
+        C.pad >= C.needLogical,
+        'pad=' + C.pad + ' 逻辑px ≥ 需要 ' + C.needLogical + '（画布高 ' + C.canvasH + ' CSS px）');
+
   // ---- 画布在缩放后坐标是否还准 ----
   const rect = await evaluate(`(function(){
     var r=document.getElementById("game").getBoundingClientRect();
@@ -337,6 +381,35 @@ const check = (label, ok, extra = '') => {
   await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   await sleep(200);
   check('手指抬起后停止跟随', (await evaluate('__SpaceLine.Input.pointer.active')) === false);
+
+  // ---- 倍速按钮：真实点一下（"看得见"不等于"按得到"）----
+  // 用真实触摸事件打在按钮的实测中心点上，而不是直接调 toggleSpeed()：
+  // 这一条要证明的恰恰是"手指真能按到这个位置"，绕开事件链路就失去意义了。
+  const spd = JSON.parse(await evaluate(`(function(){
+    var r=document.getElementById("touch-speed").getBoundingClientRect();
+    return JSON.stringify({x:r.x+r.width/2,y:r.y+r.height/2});
+  })()`));
+  await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: spd.x, y: spd.y, id: 1 }] });
+  await sleep(150);
+  await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await sleep(200);
+
+  check('真实触摸按下倍速按钮 → 切到二倍速',
+        (await evaluate('__SpaceLine.game.timeScale')) === 2,
+        'timeScale = ' + (await evaluate('__SpaceLine.game.timeScale')));
+  check('倍速按钮文字变成 ×2',
+        (await evaluate('document.getElementById("touch-speed-text").textContent')) === '×2');
+  check('倍速按钮点亮（.on）',
+        (await evaluate('document.getElementById("touch-speed").classList.contains("on")')) === true);
+
+  // 切回常速，避免影响后面那张触屏实拍的画面
+  await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: spd.x, y: spd.y, id: 1 }] });
+  await sleep(150);
+  await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await sleep(200);
+  check('再按一次回到常速（档位可逆）',
+        (await evaluate('__SpaceLine.game.timeScale')) === 1 &&
+        (await evaluate('document.getElementById("touch-speed-text").textContent')) === '1×');
 
   // ---- 触屏下的实际画面 ----
   await evaluate(`(function(){

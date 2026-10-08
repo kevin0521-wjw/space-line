@@ -45,6 +45,9 @@ _asar/
 /_*.txt
 /_*.html
 /_*.log
+/_*.py
+/_*.mjs
+/_*.bin
 
 # ---- 杂项 ----
 *.log

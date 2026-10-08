@@ -24,12 +24,14 @@
         空格                  射击（按住连发）
         Shift                 冲刺（短距突进，带无敌帧，1.1s 冷却）
         Q / 1 2 3             切换武器
+        F                     二倍速开关（整局节奏 ×2，随时可切）
         P / Esc               暂停          R  重开
 
 鼠标    按住拖动 = 移动，拖动期间自动开火
 触屏    手指拖动 = 移动 + 自动开火
         右下角圆钮 = 冲刺（钮上直接显示冷却秒数）
-        左下角圆钮 = 换枪（钮上直接显示当前武器名）
+        左下偏左圆钮 = 换枪（钮上直接显示当前武器名）
+        左下偏右圆钮 = 二倍速（开着时钮点亮成琥珀色并显示 ×2）
 ```
 
 ## 玩法
@@ -37,8 +39,9 @@
 - **连击倍率** —— 连续击杀不断则倍率从 x1 爬到 x5（每 5 连升 1 级），漏怪或受击立刻清零。这把「苟着不打」和「稳定清屏」区分开。
 - **7 种道具** —— 护盾 / 散射 / 急速 / 清屏炸弹 / 增援 / 双列 / 激光。
 - **3 把武器** —— 单发、双列（两条平行弹道）、激光（持续穿透光束）。**同位选择而非升级链条**：激光单体输出略高，但完全吃不到散射加成。
+- **二倍速模式** —— 按 `F` 让整个世界跑 2 倍速：敌机、子弹、冷却、难度推进全部同步加速，代价是反应窗口砍半。它是**难度档位**而不是本局状态，重开后仍然保留。实现上只在主循环里对 `dt` 缩放一次，且缩放后仍受 `MAX_DT` 夹紧——否则高速子弹一帧能跨 40 像素、直接跳过敌机的碰撞圆。
 - **BOSS 三阶段** —— 每 5 级一场。血量降到 66% / 33% 时换阶段：横移更快、开火更密、弹幕从单发变扇形，三阶段追加 14 发环形弹幕。**每次切换都会清空场上敌弹**，给玩家一个喘息节拍。
-- **本地排行榜** —— 分数 / 到达等级 / 存活时长，Top 5，存在 `localStorage`。
+- **本地排行榜** —— 分数 / 到达等级 / 存活时长，Top 5，存在 `localStorage`。二倍速打出的成绩会带一个 `×2` 标记，两种档位混排也不会失去可比性；存活时长记的是**真实秒数**（不是被加速过的游戏时间）。
 
 ---
 
@@ -53,6 +56,8 @@ verify/
   browsertest.js              ← 真机验证：headless Edge + CDP，含手机视口触摸测试
   livetest.js                 ← 公网验证：打开 GitHub Pages 上那份真玩一遍
   shot-action.js              ← 分镜截图：用状态钩子摆出指定局面再截图
+  chain.py                    ← 五层哈希链的同步与校验（check / sync / watch / pack-zip / release）
+  chain.bat                   ← 上面那个的 Windows 双击入口
 
 desktop/                      ← Electron 窗口壳
   main.js
@@ -62,7 +67,7 @@ desktop/                      ← Electron 窗口壳
   tools/smoke-test.mjs        ← 启动打包好的 exe，用 CDP 验证并截图
 ```
 
-**源只有一份。** `web/index.html` 与 `desktop/renderer/index.html` 都是根目录 `index.html` 的**生成副本**，被 `.gitignore` 排除——跑一次同步脚本即可重建。
+**源只有一份。** `web/index.html` 与 `desktop/renderer/index.html` 都是根目录 `index.html` 的**生成副本**，被 `.gitignore` 排除——跑一次同步脚本即可重建。加上发行 zip 和桌面 exe 里各藏一份，一共 **5 份**，一致性由 [`verify/chain.py`](#五层哈希链) 负责。
 
 ## 自己改参数
 
@@ -120,11 +125,13 @@ git push
 
 三套断言都绿了再提 PR（用法见下方[测试](#测试)）。它们覆盖了触屏拖动、武器切换、BOSS 三阶段切换、排行榜存档清洗这些容易被改坏的地方。
 
+改完还别忘了同步副本——`python verify/chain.py sync`，否则网页版改了、桌面版还跑旧代码。详见[五层哈希链](#五层哈希链)。
+
 ## 测试
 
 ```bash
-node verify/selftest.js      # 122 项逻辑断言
-node verify/browsertest.js   # 32 项真机断言 + 截图（需要本机装有 Edge）
+node verify/selftest.js      # 146 项逻辑断言
+node verify/browsertest.js   # 38 项真机断言 + 截图（需要本机装有 Edge）
 node verify/livetest.js      # 14 项公网地址断言（需要已开 GitHub Pages）
 ```
 
@@ -136,6 +143,49 @@ node verify/livetest.js      # 14 项公网地址断言（需要已开 GitHub Pa
 `browsertest.js` 用 headless Edge + CDP（WebSocket 直连，不依赖 puppeteer）跑真机回归，包含 390×844 手机视口下用**真实触摸事件**驱动拖动。
 
 `livetest.js` 打开线上 `https://kevin0521-wjw.github.io/space-line/` 真玩一遍。**它不是重复劳动**——`curl` 比哈希只能证明「服务器吐给我的字节是对的」，证明不了「浏览器拿到这些字节后能跑起来」，中间还夹着响应头、缓存/Service Worker、以及 HTTPS 下 `localStorage` 是否可用这几层。库里还做了一个独立交叉验证：让**浏览器自己** fetch 一次并用 `crypto.subtle` 算 SHA-256，与 Node 侧算的本地哈希比对，连「curl 和浏览器网络路径不同、看到的可能不是同一份」这个疑点也一并排掉。
+
+## 五层哈希链
+
+`index.html` 是唯一真源，但它被复制成 **5 份**散落在不同交付物里。任何一份漂移，都会变成「网页版修好了、桌面版还带着旧 bug」这类最难查的问题：
+
+| 层 | 位置 | 用途 | 能否自动同步 |
+|---|---|---|---|
+| **L1** | `index.html` | 唯一要改的东西 | — |
+| **L2** | `web/index.html` | 网页版 / GitHub Pages | ✅ 秒级 |
+| **L3** | `desktop/renderer/index.html` | Electron 渲染页 | ✅ 秒级 |
+| **L4** | `dist/*.zip` 内 | 发布分发包 | ❌ 需重新打包 |
+| **L5** | `desktop/release_v*/win-unpacked/resources/app.asar` 内 | 桌面 exe | ❌ 需重新打包 |
+
+所以工具把两件事分开：**改代码**只关心 L1–L3，**发版本**才重建 L4–L5。
+
+```bash
+python verify/chain.py check     # 校验五层，列出差异
+python verify/chain.py sync      # L1 -> L2/L3 同步
+python verify/chain.py watch     # 常驻监听，一保存就自动同步（Ctrl+C 停）
+python verify/chain.py release   # 完整重打包（exe + zip）并校验五层全等
+```
+
+Windows 上也可以直接双击 `verify/chain.bat`（等价于 `check`）。
+
+输出长这样：
+
+```
+  层   名称          状态      大小       sha256
+  L1   源文件        基准      184,662    c37dae0658da42e4...
+  L2   网页版        一致      184,662    c37dae0658da42e4...
+  L3   桌面渲染页    一致      184,662    c37dae0658da42e4...
+  L4   发布 zip      一致      184,662    c37dae0658da42e4...
+  L5   桌面 exe      一致      184,662    c37dae0658da42e4...
+
+  ✅ 代码层 L1-L3 已统一
+  ⚠️  发布层 L4-L5 落后于源文件     ← 正常状态，发版本时才重建
+```
+
+几个设计要点：
+
+- **二进制复制，不走文本解码。** 文本模式往返可能在换行/编码上做手脚，字节一变哈希必然失配。同步用的是 `shutil.copyfile`。
+- **先验完整再同步。** 小于 100 KB、没有 `<canvas>`、没有 `requestAnimationFrame`、没有 `window.__SpaceLine`、结尾没有 `</html>` —— 任意一条不满足就**拒绝同步**，防止把编辑器写到一半的半成品复制进交付物。确实要强推可以加 `--force`。
+- **asar 数据区起点要 4 字节对齐**（`ceil((16+json_len)/4)*4`）。不对齐会得到「内容长度一模一样、哈希却不同」的假失败，这个坑踩过一次。
 
 ## 打包桌面版
 
