@@ -94,6 +94,8 @@ verify/
   browsertest.js              ← 真机验证：headless Edge + CDP，含手机视口触摸测试
   aitest.js                   ← AI 长跑诊断：断开 rAF 用固定步长跑完整局，统计存活/死因/冲刺
   livetest.js                 ← 公网验证：打开 GitHub Pages 上那份真玩一遍
+  desktopsmoke.js             ← 桌面版冒烟：真跑 win-unpacked + CDP 连进渲染进程
+  chain.py                    ← 五层哈希链的同步 / 打包 / 校验（发布前必跑）
   shot-action.js              ← 分镜截图：用状态钩子摆出指定局面再截图
   chain.py                    ← 五层哈希链的同步与校验（check / sync / watch / pack-zip / release）
   chain.bat                   ← 上面那个的 Windows 双击入口
@@ -172,7 +174,8 @@ git push
 node verify/selftest.js      # 182 项逻辑断言
 node verify/browsertest.js   # 50 项真机断言 + 截图（需要本机装有 Edge）
 node verify/aitest.js 6 240  # 6 局 AI 自动驾驶诊断：存活/得分/死因分布/冲刺次数
-node verify/livetest.js      # 20 项公网地址断言（需要已开 GitHub Pages）
+node verify/livetest.js      # 22 项公网地址断言（需要已开 GitHub Pages）
+node verify/desktopsmoke.js  # 桌面版启动冒烟：真跑 exe + CDP 连渲染进程（需先构建 release_v*）
 ```
 
 `selftest.js` 通过把 `Math.random` 换成常量让局面完全可复现，再用两套手段观测：

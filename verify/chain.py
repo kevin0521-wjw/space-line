@@ -68,6 +68,7 @@ PROJECT = "星际防线 SpaceLine"
 # 不显式列出来，包里的截图就会永远停留在上一版。
 EXTRA_SHOTS = [
     ("_shot_12_ai_action.png", "截图/网页版-AI自动接管.png"),
+    ("_shot_13_desktop_app.png", "截图/桌面版-AI自动接管.png"),
 ]
 
 # 颜色只在真终端里开，管道/重定向时关掉，免得出乱码
