@@ -185,6 +185,42 @@ const info = (label, val) => console.log('     · ' + label + ': ' + val);
   check('敌人正常刷新', st.enemies > 0, st.enemies + ' 个');
   check('帧率正常（不是被节流的假运行）', st.elapsed - t0 > 1.0, '1.4s 墙钟内推进 ' + (st.elapsed - t0).toFixed(2) + 's');
 
+  // ---- 6.5) AI 自动模式在这个地址上真的能用（哈希相同 ≠ 功能可用）----
+  //   本轮上线的新功能就是它，所以单独验一次：钩子挂着、按 I 能接管、
+  //   接管后确实自己在开火和走位、人一按键立刻交还。
+  //   注意与 selftest 的分工：那边用「无 AI 必掉命」的对照组证明躲弹质量，
+  //   这里只证明「线上这份确实带着这个功能且能跑」。
+  check('公网页面上挂着 AI 自动模式的钩子',
+        (await evaluate('!!(window.__SpaceLine && window.__SpaceLine.AutoPilot)')) === true);
+
+  const aiBefore = JSON.parse(await evaluate(`(function(){
+    var p = __SpaceLine.game.player;
+    return JSON.stringify({x:Math.round(p.x), y:Math.round(p.y), lives:p.lives});
+  })()`));
+  await key('keyDown', 'i', 'KeyI', 73);
+  await key('keyUp', 'i', 'KeyI', 73);
+  await sleep(1300);
+  const aiState = await evaluate(`(function(){
+    var A = __SpaceLine.AutoPilot, p = __SpaceLine.game.player;
+    return JSON.stringify({on:A.on, shoot:A.input.shoot, x:Math.round(p.x), y:Math.round(p.y), lives:p.lives});
+  })()`);
+  info('AI 接管状态', aiState);
+  const ai = JSON.parse(aiState);
+  check('按 I 后 AI 在公网页面上接管', ai.on === true, aiState);
+  check('AI 接管时自己在开火（全程没按过空格）', ai.shoot === true, aiState);
+  check('AI 接管后飞船真的在自己走位',
+        Math.abs(ai.x - aiBefore.x) > 5 || Math.abs(ai.y - aiBefore.y) > 5,
+        '(' + aiBefore.x + ',' + aiBefore.y + ') → (' + ai.x + ',' + ai.y + ')');
+  check('AI 接管这段时间没在挨打（命数没掉）', ai.lives >= aiBefore.lives,
+        aiBefore.lives + ' → ' + ai.lives);
+
+  await key('keyDown', 'd', 'KeyD', 68);
+  await sleep(250);
+  const aiAfter = await evaluate('__SpaceLine.AutoPilot.on');
+  check('真人一按键立刻夺回控制权', aiAfter === false, 'on = ' + aiAfter);
+  await key('keyUp', 'd', 'KeyD', 68);
+  await sleep(150);
+
   // ---- 7) 排行榜写入路径（走真实的 localStorage，不是桩）----
   const board = await evaluate(`(function(){
     try {
