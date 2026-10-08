@@ -35,6 +35,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -60,6 +61,14 @@ DIST = os.path.join(ROOT, "dist")
 DESKTOP = os.path.join(ROOT, "desktop")
 
 PROJECT = "星际防线 SpaceLine"
+
+# 追加进发布 zip 的实拍图：(verify/ 下的文件名, 包内路径)
+# 为什么要单独列一份：包里的截图是**只存在于 zip 里**的一次性素材，
+# 打包走"以上一版为模板"的路子，所以本版新拍的图不会自动进去 ——
+# 不显式列出来，包里的截图就会永远停留在上一版。
+EXTRA_SHOTS = [
+    ("_shot_12_ai_action.png", "截图/网页版-AI自动接管.png"),
+]
 
 # 颜色只在真终端里开，管道/重定向时关掉，免得出乱码
 if sys.stdout.isatty():
@@ -383,11 +392,21 @@ def release_dir(version):
     return os.path.join(DESKTOP, "release_v" + version.replace(".", ""))
 
 
-def do_pack_zip(version, out_path=None, force=False):
-    """重打发布 zip：以现有 zip 为模板，替换 index.html 与桌面 exe。
+def do_pack_zip(version, out_path=None, force=False, extra=None):
+    """重打发布 zip：以现有 zip 为模板，替换 index.html / 使用说明 / 桌面 exe，
+    并把包内所有带版本号的条目名改成当前版本。
 
-    走"模板替换"而不是"从零组装"，是为了不丢包里的截图、使用说明这些
-    一次性素材 —— 它们在项目里没有留存副本，只在包里。
+    走"模板替换"而不是"从零组装"，是为了不丢包里的截图这些一次性素材
+    —— 它们在项目里没有留存副本，只在包里。
+
+    下面三件事缺一不可，缺任何一件都会发出一个"看起来正常、其实内容错"的包：
+      1) **改条目名**。模板包里是 SpaceLine-1.2.0-*.exe 和 星际防线-...-v1.2.0/，
+         新版文件名里带的是新版本号 —— 只换内容不改名字的话，解压出来会是
+         "1.3.0 的压缩包里装着 1.2.0 的 exe"。
+      2) **换掉包内的 使用说明.txt**。它随版本改（本版新增了 AI 与二倍速说明），
+         不换就会与 exe、index.html 自相矛盾。
+      3) **不要覆盖模板包**。原来的默认输出就是模板本身，等于"发新版 = 抹掉旧版"，
+         历史版本就此丢失。
     """
     ok, why = validate_source(force)
     if not ok:
@@ -400,63 +419,89 @@ def do_pack_zip(version, out_path=None, force=False):
         return False
 
     rdir = release_dir(version)
-    repl = {}
-    for kind, fn in (
-        ("免安装绿色版", "SpaceLine-%s-portable.exe" % version),
-        ("安装包", "SpaceLine-%s-setup.exe" % version),
-    ):
-        p = os.path.join(rdir, fn)
-        if os.path.exists(p):
-            repl[fn] = p
+    if extra is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        extra = [(os.path.join(here, a), b) for a, b in EXTRA_SHOTS]
+    # 按"基础名 + 任意版本号"配对，而不是按全名 —— 模板里是旧版本号
+    pairs = [
+        (re.compile(r"^SpaceLine-[\d.]+-portable\.exe$"),
+         os.path.join(rdir, "SpaceLine-%s-portable.exe" % version)),
+        (re.compile(r"^SpaceLine-[\d.]+-setup\.exe$"),
+         os.path.join(rdir, "SpaceLine-%s-setup.exe" % version)),
+    ]
+    readme_path = os.path.join(DIST, "使用说明.txt")
+    have_readme = os.path.exists(readme_path)
 
-    # zip 内 index.html 与 exe 的完整条目名
     with zipfile.ZipFile(template) as z:
         names = z.namelist()
-    top = names[0].split("/")[0] if names else ("星际防线-SpaceLine-v%s" % version)
-    html_entry = None
-    exe_entries = {}
-    for n in names:
-        base = os.path.basename(n)
-        if base.lower() == "index.html":
-            html_entry = n
-        for fn, local in repl.items():
-            if base == fn:
-                exe_entries[n] = local
-
-    if not html_entry:
+    if not any(os.path.basename(n).lower() == "index.html" for n in names):
         print("  \u274c 模板 zip 里没有 index.html")
         return False
 
+    old_top = names[0].split("/")[0] if names else ""
+    new_top = "星际防线-SpaceLine-v%s" % version
+
     src_html = open(SRC, "rb").read()
-    out = out_path or template
+    out = out_path or os.path.join(DIST, "%s.zip" % new_top)
+    if os.path.abspath(out) == os.path.abspath(template):
+        print("  \u274c 拒绝把模板包本身当输出（那会把历史版本抹掉）")
+        return False
     tmp = out + ".tmp"
 
     print("  模板：%s" % rel(template))
-    print("  换入：%s（%s 字节）" % (html_entry, "{:,}".format(len(src_html))))
-    for n, local in sorted(exe_entries.items()):
-        print("       %s  <-  %s" % (n, rel(local)))
-    if not exe_entries:
-        print("  " + YELLOW + "  注意：没找到新版桌面 exe，包里的 exe 会是旧的" + RESET)
-        print("  " + DIM + "        先跑 cd desktop && npm run dist 生成 exe" + RESET)
+    print("  顶层目录：%s  ->  %s" % (old_top, new_top))
+    print("  换入 index.html（%s 字节）" % "{:,}".format(len(src_html)))
+    n_exe = 0
+    for pat, local in pairs:
+        if os.path.exists(local):
+            n_exe += 1
+            print("  换入 %s  <-  %s" % (os.path.basename(local), rel(local)))
+        else:
+            print("  " + YELLOW + "  注意：缺少 %s，包里的 exe 会保持旧版" % rel(local) + RESET)
+    if have_readme:
+        print("  换入 使用说明.txt")
 
     t0 = time.time()
+    added = 0
     with zipfile.ZipFile(template) as zin, zipfile.ZipFile(tmp, "w") as zout:
         for item in zin.infolist():
-            name = item.filename
-            if name == html_entry:
-                zout.writestr(item, src_html)
-            elif name in exe_entries:
-                zout.writestr(item, open(exe_entries[name], "rb").read())
+            name = item.filename          # 原始条目名：读 zip 内容必须用它
+            base = os.path.basename(name)
+            arc = name
+            data = None
+            if old_top and arc.startswith(old_top + "/"):
+                arc = new_top + arc[len(old_top):]
+            if base.lower() == "index.html":
+                data = src_html
+            elif base == "使用说明.txt" and have_readme:
+                data = open(readme_path, "rb").read()
             else:
+                for pat, local in pairs:
+                    if pat.match(base) and os.path.exists(local):
+                        data = open(local, "rb").read()
+                        folder = os.path.dirname(arc).replace("\\", "/")
+                        arc = (folder + "/" if folder else "") + os.path.basename(local)
+                        break
+            item.filename = arc
+            if data is None:
                 # 其余条目原样搬运，保留原有压缩方式
                 zout.writestr(item, zin.read(name))
+            else:
+                zout.writestr(item, data)
+        # 追加本版新增的实拍图（存在才加；缺图不该让整个打包失败）
+        for local, arcname in (extra or []):
+            if os.path.exists(local):
+                zout.write(local, new_top + "/" + arcname)
+                added += 1
+                print("  追加：%s" % arcname)
     os.replace(tmp, out)
 
-    print("  \u2705 已写出 %s（%s 字节，耗时 %.1fs）" % (
-        rel(out), "{:,}".format(os.path.getsize(out)), time.time() - t0))
+    print("  \u2705 已写出 %s（%s 字节，%d 个新条目，耗时 %.1fs）" % (
+        rel(out), "{:,}".format(os.path.getsize(out)), added, time.time() - t0))
+    if n_exe == 0:
+        print("  " + YELLOW + "  注意：包里的桌面 exe 是旧版" + RESET)
+        print("  " + DIM + "        先构建 desktop/release_v%s 再打包" % version.replace(".", "") + RESET)
     return True
-
-
 def do_release(version, force=False):
     """完整重打包：sync -> electron-builder -> 整理产物 -> 重打 zip -> 校验。"""
     print("\n=== 1/5  同步代码层 ===")
