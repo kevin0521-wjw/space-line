@@ -490,11 +490,22 @@ def do_pack_zip(version, out_path=None, force=False, extra=None):
             else:
                 zout.writestr(item, data)
         # 追加本版新增的实拍图（存在才加；缺图不该让整个打包失败）
+        # ⚠️ 必须先查重：模板里可能已经有这张图了（上一版就加过），
+        # 无条件追加会在同一个包里出现**两个同名条目** —— 多数解压软件
+        # 静默取第一个，解压出来到底是哪张图就成玄学问题了。
+        have = set(names)
         for local, arcname in (extra or []):
+            full = new_top + "/" + arcname
+            if full in have:
+                print("  跳过（模板里已有）：%s" % arcname)
+                continue
             if os.path.exists(local):
-                zout.write(local, new_top + "/" + arcname)
+                zout.write(local, full)
+                have.add(full)
                 added += 1
                 print("  追加：%s" % arcname)
+            else:
+                print("  " + YELLOW + "  注意：缺少截图 %s" % local + RESET)
     os.replace(tmp, out)
 
     print("  \u2705 已写出 %s（%s 字节，%d 个新条目，耗时 %.1fs）" % (
