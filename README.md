@@ -10,9 +10,12 @@
 
 | 形态 | 怎么开始 |
 |---|---|
+| **在线试玩** | **<https://kevin0521-wjw.github.io/space-line/>** —— 免安装、手机可直接打开。合并 PR 后自动更新 |
 | 网页版 | 下载 `index.html`，双击（或拖进 Chrome / Edge 窗口）。无需服务器、无需联网 |
-| 手机上 | 把 `index.html` 发到手机（微信文件 / 网盘都行），用手机浏览器打开。**横屏体验明显更好**（画布能大 30%） |
+| 手机上 | 直接开上面的在线地址；或把 `index.html` 发到手机（微信文件 / 网盘都行）用浏览器打开。**横屏体验明显更好**（画布能大 30%） |
 | 桌面版 | 见下方[打包桌面版](#打包桌面版)，或从 Releases 下载 |
+
+> 在线地址是**只读的托管副本**——它用来「玩」，不用来「改」。想改代码见[参与修改](#参与修改)。
 
 ## 操作
 
@@ -78,6 +81,48 @@ WEAPON: {
   LASER: { cd: 0,    dps: 16, width: 10 },
 },
 ```
+
+## 参与修改
+
+**注意：在线试玩地址（GitHub Pages）是只读托管，改不了代码。** 要改代码，走仓库这一层：
+
+### 方式一：Fork + Pull Request（无需授权，推荐）
+
+```bash
+# 1. 点仓库右上角 Fork，得到你自己的副本
+# 2. 克隆你自己的副本
+git clone https://github.com/<你的用户名>/space-line.git
+cd space-line
+
+# 3. 改 index.html，改完双击就能试玩（源文件就是可直接运行的游戏本体）
+# 4. 提交并推送
+git add -A && git commit -m "调整 BOSS 弹幕速度"
+git push
+```
+
+然后在 GitHub 上点 **Compare & pull request**。改动会逐行展示、可评论、可要求修改，**合并与否由仓库维护者决定**。谁都能提案，拍板权在维护者手里。
+
+### 方式二：直接给写权限（需要维护者操作）
+
+仓库 Settings → Collaborators → Add people，加对方 GitHub 用户名，角色选 **Write**，对方就能直接 `git push` 到这个仓库。各档权限：
+
+| 角色 | 能做什么 |
+|---|---|
+| Read | 只能克隆、看代码 |
+| **Write** | 能推代码、开 Issue / PR ← 默认给这档 |
+| Maintain | 额外能改仓库设置（不能删仓库） |
+| Admin | 能删仓库、能踢人 ← 别给 |
+
+**第三方实时协作**（双方同时改同一个文件，改完立即看到）：[VS Code Live Share](https://visualstudio.microsoft.com/services/live-share/)（需双方装 VS Code 登录微软账号）、[CodePen Collab Mode](https://codepen.io/)（把 `index.html` 内容贴进 HTML 面板，免安装）。
+
+### 改完记得跑测试
+
+```bash
+node verify/selftest.js      # 122 项逻辑断言
+node verify/browsertest.js   # 32 项真机断言（需要本机装有 Edge）
+```
+
+两个都绿了再提 PR。这两套断言覆盖了触屏拖动、武器切换、BOSS 三阶段切换、排行榜存档清洗这些容易被改坏的地方。
 
 ## 测试
 
