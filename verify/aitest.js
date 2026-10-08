@@ -16,7 +16,7 @@
  *   没有任何实体相撞却有敌机消失 → 漏怪。
  *   （注意 Shockwave 只是视觉，不扣命，所以不在分类里。）
  *
- * 用法：node verify/aitest.js [局数] [每局最多模拟秒数]
+ * 用法：node verify/aitest.js [局数] [每局最多模拟秒数] [截图时刻秒数，0=不截]
  */
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -29,6 +29,9 @@ const PAGE = 'file:///' + path.join(CWD, '..', 'index.html').replace(/\\/g, '/')
 
 const ROUNDS = Number(process.argv[2] || 3);
 const MAX_SEC = Number(process.argv[3] || 300);
+/* 第 4 个参数：>0 时在第 1 局快进到该秒数截一张图（0 = 不截）。
+   用来在"AI 已经很忙"的时刻取画面，而不是开局 1.5 秒的安静场面。 */
+const SHOT_AT = Number(process.argv[4] || 0);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -350,6 +353,23 @@ const INSTALL = `
 
     process.stdout.write('第 ' + round + ' 局：AI=' + on + ' 模拟中');
     let sec = 0;
+
+    /* ---- 顺手拍一张"AI 忙起来"的照片 ----
+       数字能证明它打得更好，但玩家关心的是"看起来怎么样"。
+       这里直接复用快进能力：跑到第 SHOT_AT 秒截一张，
+       免得为了截图再等一分钟真实时间。 */
+    if (SHOT_AT > 0) {
+      while (sec < SHOT_AT) {
+        if (await evaluate('__diag.step(600)') === false) break;
+        sec += 10;
+      }
+      const shot = await send('Page.captureScreenshot', { format: 'png' });
+      if (shot && shot.data) {
+        fs.writeFileSync(path.join(CWD, '_shot_12_ai_action.png'), Buffer.from(shot.data, 'base64'));
+        console.log('\n  📷 已截图 verify/_shot_12_ai_action.png（' + sec + 's 处）');
+      }
+    }
+
     while (sec < MAX_SEC) {
       const alive = await evaluate('__diag.step(600)');   // 10 秒
       sec += 10;
