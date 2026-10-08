@@ -539,6 +539,71 @@ def _write_zip(version, template, names, old_top, new_top, src_html,
         print("  " + YELLOW + "  注意：包里的桌面 exe 是旧版" + RESET)
         print("  " + DIM + "        先构建 desktop/release_v%s 再打包" % version.replace(".", "") + RESET)
     return True
+
+
+# ---------------------------------------------------------------- 产物整理
+
+def has_payload(built):
+    """构建目录里有没有"这次真的产出了能发货的东西"。
+
+    为什么需要它：electron-builder 在收尾阶段会删自己的中间产物，那一步偶发 EBUSY
+    （文件被占用）就整体报 failed —— 但 portable/setup 两个 exe 其实早已写完并签好名。
+    只看退出码就判死刑，会让人白重跑 3 分钟。
+
+    ⚠️ 判据必须落在**顶层的 portable/setup exe** 上，不能放宽成"目录里有 app.asar 就算"。
+       我第一版就是这么写的，结果自己写了个假保证：构建失败后目录里往往还留着
+       **上一版**留下的 win-unpacked/resources/app.asar（实测就有个 10 月 5 日的 62 KB 残留），
+       照那个判据会拿陈旧产物冒充新产物、让流程"通过"——
+       比老老实实报错更糟，因为它把失败伪装成了成功。
+       exe 每次构建都会被重写，残留目录里不会有它。
+    """
+    if not os.path.isdir(built):
+        return False
+    try:
+        names = os.listdir(built)
+    except OSError:
+        return False
+    for f in names:
+        low = f.lower()
+        if low.endswith(".exe") and ("portable" in low or "setup" in low):
+            return True
+    return False
+
+
+def merge_tree(src, dst):
+    """把 src 的内容**逐文件覆盖**到 dst 已存在的目录里。
+
+    为什么不 shutil.rmtree(dst) + copytree(src, dst)：
+    那两步之间有一个"dst 整个不存在"的窗口，中途失败的话 dst 就没了 ——
+    而 dst 正是五层校验里 L5（exe 内的页面）的唯一来源，最不该先丢的就是它。
+    覆盖式合并任何时刻都留着上一版可用，最坏结果是"部分文件是新的"，能被校验发现。
+
+    @returns {tuple<int, list>} (成功覆盖的文件数, 被占用而跳过的文件路径)
+    """
+    n = 0
+    skipped = []
+    for root, _dirs, files in os.walk(src):
+        # ⚠️ 局部变量别叫 rel：模块级有个同名的 rel() 辅助函数（打路径用），
+        #    遮蔽之后下面错误分支里的 rel(...) 会变成 "str is not callable"，
+        #    于是**恰好在出错时**再抛一个 TypeError，把真正的错误盖掉。
+        relpath = os.path.relpath(root, src)
+        out_dir = dst if relpath == "." else os.path.join(dst, relpath)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as e:
+            skipped.append(out_dir)
+            print("  " + YELLOW + "  建目录失败 %s：%s" % (rel(out_dir), e) + RESET)
+            continue
+        for f in files:
+            s = os.path.join(root, f)
+            d = os.path.join(out_dir, f)
+            try:
+                shutil.copyfile(s, d)      # 覆盖写：不需要先 unlink，也就绕开了 EBUSY 的删除路径
+                n += 1
+            except (OSError, PermissionError) as e:
+                skipped.append(d)
+                print("  " + YELLOW + "  跳过 %s：%s" % (rel(d), e) + RESET)
+    return n, skipped
 def do_release(version, force=False):
     """完整重打包：sync -> electron-builder -> 整理产物 -> 重打 zip -> 校验。"""
     print("\n=== 1/5  同步代码层 ===")
@@ -552,20 +617,36 @@ def do_release(version, force=False):
         return False
     print("  " + DIM + "这一步会跑几分钟（portable + nsis 两个目标都要压 145 MB）" + RESET)
     r = subprocess.run([npm, "run", "dist"], cwd=DESKTOP, shell=(os.name == "nt"))
-    if r.returncode != 0:
-        print("  \u274c electron-builder 失败，退出码 %d" % r.returncode)
-        return False
-
-    print("\n=== 3/5  整理产物到 release_v%s ===" % version.replace(".", ""))
     built = os.path.join(DESKTOP, "release")
+    if r.returncode != 0:
+        # 构建器收尾时会删自己的中间产物，偶发 EBUSY（文件被占用）。
+        # 那种情况下产物其实已经落盘了 —— 先问一句再判失败，否则会白重跑 3 分钟。
+        if has_payload(built):
+            print("  \u26a0\ufe0f electron-builder \u9000\u51fa\u7801\u975e\u96f6\uff0c\u4f46\u4ea7\u7269\u5df2\u843d\u76d8\uff0c\u7ee7\u7eed\u5f80\u4e0b\u8d70")
+        else:
+            print("  \u274c electron-builder \u5931\u8d25\uff0c\u9000\u51fa\u7801 %d\uff0c\u4e14\u6ca1\u627e\u5230\u4ea7\u7269" % r.returncode)
+            return False
+
+    print("\n=== 3/5  \u6574\u7406\u4ea7\u7269\u5230 release_v%s ===" % version.replace(".", ""))
     rdir = release_dir(version)
     if not os.path.isdir(built):
-        print("  \u274c 找不到 %s" % rel(built))
+        print("  \u274c \u627e\u4e0d\u5230 %s" % rel(built))
         return False
-    if os.path.isdir(rdir):
-        shutil.rmtree(rdir)
-    shutil.copytree(built, rdir)
-    print("  \u2705 %s -> %s" % (rel(built), rel(rdir)))
+    # 逐文件覆盖，而不是 rmtree + copytree：
+    #   后者有一个「目标目录整个不存在」的窗口。
+    #   中途失败的话 L5 就直接没了源 —— 而 L5 恰好是用来证明
+    #   「exe 里的页面 == 仓库里的页面」的那一层，最不该先丢的就是它。
+    #   覆盖式合并任何时刻都留着上一版可用，
+    #   最坏结果是「部分文件是新的」，而这能被校验发现。
+    n, skipped = merge_tree(built, rdir)
+    if n == 0:
+        print("  \u274c \u4e00\u4e2a\u6587\u4ef6\u90fd\u6ca1\u8986\u76d6\u6210\u529f\uff0c\u4ea7\u7269\u4ecd\u4e0e\u6e90\u4e0d\u4e00\u81f4")
+        return False
+    if skipped:
+        print("  \u26a0\ufe0f %d \u4e2a\u6587\u4ef6\u88ab\u5360\u7528\u3001\u6ca1\u6362\u6389\uff08\u901a\u5e38\u662f\u6b8b\u7559\u7684\u8fdb\u7a0b\u53e5\u67c4\uff09\uff1a" % len(skipped))
+        for sp in skipped[:5]:
+            print("       %s" % rel(sp))
+    print("  \u2705 %s -> %s\uff08\u8986\u76d6 %d \u4e2a\u6587\u4ef6\uff09" % (rel(built), rel(rdir), n))
 
     print("\n=== 4/5  重打发布 zip ===")
     if not do_pack_zip(version, force=force):
