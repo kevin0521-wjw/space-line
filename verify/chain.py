@@ -444,9 +444,34 @@ def do_pack_zip(version, out_path=None, force=False, extra=None):
 
     src_html = open(SRC, "rb").read()
     out = out_path or os.path.join(DIST, "%s.zip" % new_top)
+
+    # ⚠️ 重发**同一版本**时（改了 index.html 要重新出包），默认输出正好落在模板包上。
+    #    模板包既是输入又是输出，等于边读边改写自己 —— 所以先把模板复制一份到
+    #    临时名，用它当输入、正式名当输出。这不是洁癖：zipfile 允许同名读写，
+    #    结果会是"写了一半的包"，而它**不会报错**，只会在用户解压时才发现。
+    tmp_tpl = None
     if os.path.abspath(out) == os.path.abspath(template):
-        print("  \u274c 拒绝把模板包本身当输出（那会把历史版本抹掉）")
-        return False
+        tmp_tpl = os.path.join(DIST, "0-template-%s.zip" % version)
+        shutil.copyfile(template, tmp_tpl)
+        print("  （重发同一版本：模板复制到 %s 再改写，避免边读边写坏包）"
+              % os.path.basename(tmp_tpl))
+        template = tmp_tpl
+        with zipfile.ZipFile(template) as z:
+            names = z.namelist()
+
+    try:
+        return _write_zip(version, template, names, old_top, new_top, src_html,
+                          out, pairs, have_readme, readme_path, extra)
+    finally:
+        if tmp_tpl and os.path.exists(tmp_tpl):
+            try:
+                os.remove(tmp_tpl)
+            except OSError:
+                pass
+
+
+def _write_zip(version, template, names, old_top, new_top, src_html,
+               out, pairs, have_readme, readme_path, extra):
     tmp = out + ".tmp"
 
     print("  模板：%s" % rel(template))
