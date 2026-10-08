@@ -36,6 +36,16 @@ desktop/shots/
 desktop/_asar_index.html
 _asar/
 
+# ---- API / 调试过程中的临时文件 ----
+#  🚨 这条是踩坑换来的：调 GitHub API 时反复会在根目录写 _rel.json / _up_*.json
+#     这类请求与响应体，一个 `git add -A` 就会把它们提交进公开仓库。
+#     根目录下划线开头的文件一律视为临时产物，别指望每次记得手动删。
+#     仓库里没有任何以下划线开头的正式文件（src/_ 这种东西），所以不会误伤。
+/_*.json
+/_*.txt
+/_*.html
+/_*.log
+
 # ---- 杂项 ----
 *.log
 .DS_Store

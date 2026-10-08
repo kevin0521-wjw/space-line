@@ -51,6 +51,7 @@ dist/使用说明.txt              ← 面向玩家的说明（含三种形态�
 verify/
   selftest.js                 ← 逻辑自检：在 Node 里搭最小浏览器环境直接跑游戏脚本
   browsertest.js              ← 真机验证：headless Edge + CDP，含手机视口触摸测试
+  livetest.js                 ← 公网验证：打开 GitHub Pages 上那份真玩一遍
   shot-action.js              ← 分镜截图：用状态钩子摆出指定局面再截图
 
 desktop/                      ← Electron 窗口壳
@@ -117,18 +118,14 @@ git push
 
 ### 改完记得跑测试
 
-```bash
-node verify/selftest.js      # 122 项逻辑断言
-node verify/browsertest.js   # 32 项真机断言（需要本机装有 Edge）
-```
-
-两个都绿了再提 PR。这两套断言覆盖了触屏拖动、武器切换、BOSS 三阶段切换、排行榜存档清洗这些容易被改坏的地方。
+三套断言都绿了再提 PR（用法见下方[测试](#测试)）。它们覆盖了触屏拖动、武器切换、BOSS 三阶段切换、排行榜存档清洗这些容易被改坏的地方。
 
 ## 测试
 
 ```bash
 node verify/selftest.js      # 122 项逻辑断言
 node verify/browsertest.js   # 32 项真机断言 + 截图（需要本机装有 Edge）
+node verify/livetest.js      # 14 项公网地址断言（需要已开 GitHub Pages）
 ```
 
 `selftest.js` 通过把 `Math.random` 换成常量让局面完全可复现，再用两套手段观测：
@@ -137,6 +134,8 @@ node verify/browsertest.js   # 32 项真机断言 + 截图（需要本机装有 
 2. **状态钩子** —— `index.html` 暴露的 `window.__SpaceLine`，直接断言连击倍率、护盾、Boss 血量这类内部状态，比反解像素强得多。
 
 `browsertest.js` 用 headless Edge + CDP（WebSocket 直连，不依赖 puppeteer）跑真机回归，包含 390×844 手机视口下用**真实触摸事件**驱动拖动。
+
+`livetest.js` 打开线上 `https://kevin0521-wjw.github.io/space-line/` 真玩一遍。**它不是重复劳动**——`curl` 比哈希只能证明「服务器吐给我的字节是对的」，证明不了「浏览器拿到这些字节后能跑起来」，中间还夹着响应头、缓存/Service Worker、以及 HTTPS 下 `localStorage` 是否可用这几层。库里还做了一个独立交叉验证：让**浏览器自己** fetch 一次并用 `crypto.subtle` 算 SHA-256，与 Node 侧算的本地哈希比对，连「curl 和浏览器网络路径不同、看到的可能不是同一份」这个疑点也一并排掉。
 
 ## 打包桌面版
 
