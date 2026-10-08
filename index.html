@@ -288,6 +288,9 @@
   /* 二倍速标记：琥珀色，与普通成绩区分开。用 ×2 而不是文字，
      因为榜单是等宽字体的紧凑列表，一个符号比"二倍速"三个字省地儿也更快读。 */
   #ov-board .brow .sc .sp{ color: #ffb457; margin-left: 6px; font-size: .86em; }
+  /* AI 标记：紫色。它和二倍速标记是同一类信息 ——
+     "这个分数不是在同等条件下的产物"，必须能一眼分辨。 */
+  #ov-board .brow .sc .ai{ color: #b48cff; margin-left: 6px; font-size: .86em; }
   #ov-board .brow .meta{ color: #476b8a; font-size: .92em; }
   /* 本局排名高亮：玩家一眼就能在榜上找到自己刚才那一次 */
   #ov-board .brow.now .rk,
@@ -357,6 +360,23 @@
     color: #ffb457;
     background: rgba(255, 180, 87, .16);
   }
+  /* AI 自动模式按钮：排在冲刺按钮左边（right: 86 = 14 + 62 + 10），同处底部一行。
+     ⚠️ 为什么在右侧而不是挨着倍速（左侧）—— 这是实拍+真机测试逼出来的结论：
+     竖屏手机上画布只有约 367 CSS 像素宽，一颗圆钮就占 62px。
+     左侧簇一旦向右多排一颗（到 158px），它的右边界就压过了画布中线的 0.5w ≈ 183，
+     而"手指落在飞船正下方开始拖动"恰恰就在那条线上 —— 于是手指一按下去
+     就点在按钮上，画布收不到拖动（实测表现为"飞船几乎不跟着走"）。
+     底部中央必须永远留给拖动，所以左侧簇最多两颗。
+     放右侧的代价是它离右拇指近一点，但它是整局只按一两次的档位开关，风险可控。 */
+  #touch-ai{ right: 86px; border-color: rgba(180, 140, 255, .5); }
+  #touch-ai:active{ background: rgba(180, 140, 255, .3); }
+  /* 接管中：点亮成紫色。这个状态必须一眼可见 ——
+     否则玩家会困惑"我的飞船怎么自己在动"，甚至以为手机触控坏了。 */
+  #touch-ai.on{
+    border-color: rgba(180, 140, 255, .9);
+    color: #d9c6ff;
+    background: rgba(180, 140, 255, .18);
+  }
 
   /* 覆盖层必须盖在触屏按钮之上，否则暂停/结束时按钮还能被按到 */
   #overlay{ z-index: 10; }
@@ -382,6 +402,7 @@
         <kbd>Shift</kbd> 冲刺 ·
         <kbd>Q</kbd> 换枪 ·
         <kbd>F</kbd> 二倍速 ·
+        <kbd>I</kbd> AI 自动 ·
         <kbd>P</kbd> 暂停 ·
         <kbd>R</kbd> 重开
       </p>
@@ -398,6 +419,10 @@
       <!-- 倍速开关：位置在换枪按钮上方，故意避开两个拇指的主战场（见 CSS 注释） -->
       <button id="touch-speed" class="tbtn" type="button">
         <span id="touch-speed-text">1×</span><small>倍速 F</small>
+      </button>
+      <!-- AI 自动模式开关：排在冲刺按钮左侧，同处底部一行（为什么不在左边见 CSS 注释） -->
+      <button id="touch-ai" class="tbtn" type="button">
+        <span id="touch-ai-text">AI</span><small>自动 I</small>
       </button>
     </div>
   </div>
@@ -440,6 +465,32 @@ const CFG = {
     FAST: 2,             // 二倍速档
     TAG: '×2'            // 排行榜上的标记。加速局和普通局的分数若混在同一张榜上
                          // 而不加区分，这个榜就不再具备可比性 —— 所以必须有标记
+  },
+
+  /* ---------- AI 自动模式 ----------
+     让 AI 接管整局操作：走位躲弹、开火、换枪、保命冲刺、顺路捡道具。
+     实现上的关键选择是：**AI 不直接改飞船坐标**，而是往 Game 的输入通道里
+     塞一个"虚拟手柄"（接口与 Input 完全同形）。于是走位插值、碰撞判定、
+     倾斜姿态、尾焰、冲刺无敌帧全部复用玩家那一套代码 ——
+     AI 能用的速度上限、会撞到的判定，和真人完全一致，它没法靠"手速"作弊。
+     另一个守住的性质是：它只能靠"减少被弹面积"活下来。
+     一旦允许它直接写坐标，那它就不是在玩这个游戏了。 */
+  AI: {
+    KEY: 'i',                // 开关快捷键
+    TAG: 'AI',               // HUD 角标 / 排行榜标记
+    SAMPLES: 41,             // 横向候选点数（奇数，正中间那个 = 当前位置）
+    ROWS: 5,                 // 纵向候选层数
+    HORIZON: 1.5,            // 威胁推演时长（秒）。再长会把"远处还不确定的弹"也算成威胁，
+                             // AI 会变得过度保守、缩在角落不敢走位
+    SAFETY: 4.2,             // 危险度权重。必须远大于攻击收益 —— 活着才有输出
+    MARGIN: 5,               // 额外安全边距（像素）：不贴着弹道擦过去，留一点余量
+    NEAR_MISS: 2.4,          // 危险度衰减半径 = 判定半径 × 该值，之外视为无威胁
+    DASH_AT: 1.0,            // 最优格的危险度超过该值 = "已经躲不掉了"，用冲刺无敌帧硬扛
+    POWERUP_PULL: 0.45,      // 道具吸引权重（危险度权重压得住它，只在安全时才生效）
+    RUSH_BOTTOM: 0.9,        // 敌机越接近底部，击杀优先级越高 —— 漏怪同样扣命
+    Y_MIN_RATIO: 0.52,       // AI 的纵向活动范围（占画布高度）。
+    Y_MAX_RATIO: 0.90        // 上界 0.52 保证它始终停在 Boss 本体高度之下；
+                             // 下界 0.9 让它不至于贴到"漏怪线"上去（详见 _danger 的注释）
   },
 
   /* ---------- 屏幕反馈（震动）----------
@@ -986,6 +1037,376 @@ const Input = {
 
   /** 请求一次冲刺（供屏幕按钮调用）。参数：无。返回：无。 */
   requestDash() { this.pointer.dashRequest = true; }
+};
+
+/* ============================================================================
+ * 3b. AI 自动模式 AutoPilot
+ *    —— 接管玩家操作。它读的是 Game 的战场状态，写的是"一个与 Input 同形的
+ *       虚拟手柄"，因此 Game 那边只需要换一个输入源，其余代码一行都不用改。
+ * ========================================================================== */
+
+const AutoPilot = {
+  on: false,          // 是否正在接管
+  engaged: 0,         // 已接管时长（秒），仅用于展示
+
+  goalX: 0,           // 本帧求解出的落点（逻辑坐标）
+  goalY: 0,
+  danger: 0,          // 落点的危险度（0 = 完全安全）；超过 DASH_AT 才考虑冲刺
+
+  _weaponTimer: 0,    // 换枪决策的节流计时
+  _wantWeapon: '',    // 上一次的换枪意向（用于滞后判定，避免在边界上反复横跳）
+  _wantHits: 0,
+
+  /* ---- 虚拟手柄 ----
+     接口必须与 Input 严格同形。Game 只用到这几样：
+       left/right/up/down · pointer{active,targetX,targetY,dx,dy} · shoot · consumeDash()
+     任何一项漏掉都不会报错，只会静默失效（读到 undefined），
+     所以这里宁可把当前不用的字段也一并写全。 */
+  input: {
+    left: false,
+    right: false,
+    up: false,
+    down: false,
+    pointer: { active: false, targetX: 0, targetY: 0, dx: 0, dy: 0 },
+    _dash: false,
+    get shoot() { return AutoPilot.on; },
+    consumeDash() { const r = this._dash; this._dash = false; return r; }
+  },
+
+  /**
+   * 开关自动模式。
+   * @param {object} game Game 实例
+   * @returns {boolean} 切换后的状态
+   */
+  toggle(game) {
+    return this.on ? this.disengage(game, 'toggle') : this.engage(game);
+  },
+
+  /**
+   * 接管操作。
+   * @param {object} game Game 实例
+   * @returns {boolean} 恒为 true
+   */
+  engage(game) {
+    this.on = true;
+    this.engaged = 0;
+    this.danger = 0;
+    this._weaponTimer = 0;
+    this._wantWeapon = '';
+    this._wantHits = 0;
+    this.input._dash = false;
+    this.input.pointer.active = true;
+
+    // 清掉一次按键残留：否则"玩家按着方向键去点 AI"的瞬间，
+    // 那一帧的按键状态会被判成手动输入，AI 刚开就被自己踢掉。
+    Input.clear();
+
+    if (game && game.state === 'playing') {
+      game.showBanner('AI 接管', '自动走位 · 自动开火', 1.2, '#b48cff');
+    }
+    return true;
+  },
+
+  /**
+   * 交还操作权。
+   * @param {object} game Game 实例
+   * @param {'toggle'|'manual'|'run-over'} reason 交还原因
+   * @returns {boolean} 恒为 false
+   */
+  disengage(game, reason) {
+    this.on = false;
+    this.input.pointer.active = false;
+    this.input._dash = false;
+    // 只有"玩家动手抢回来"才提示：主动按 I 关掉是他自己的操作，不需要再解释一遍
+    if (game && game.state === 'playing' && reason === 'manual') {
+      game.showBanner('已交还操作', '检测到手动输入', 1.1, '#7fe8ff');
+    }
+    return false;
+  },
+
+  /**
+   * 清空接管状态（重开一局时调用）。参数：无。返回：无。
+   * 注意这里**不**改变 on：AI 是一个档位，换一局不该把它关掉。
+   */
+  reset() {
+    this.engaged = 0;
+    this.danger = 0;
+    this._weaponTimer = 0;
+    this._wantWeapon = '';
+    this._wantHits = 0;
+    this.input._dash = false;
+    this.input.pointer.active = this.on;
+  },
+
+  /**
+   * 玩家此刻是否正在手动操作。
+   * @returns {boolean}
+   * 判的是"当前输入状态"而不是拦截事件：无论玩家用的是键盘、鼠标还是手指，
+   * 也不管事件从哪个元素发起，都只有一条判断路径，不会漏掉某种输入方式。
+   */
+  _manualInput() {
+    if (Input.pointer.active) return true;   // 手指/鼠标确实按在画布上
+    if (Input.left || Input.right || Input.up || Input.down) return true;
+    if (Input.keys[' '] || Input.keys['shift']) return true;
+    return false;
+  },
+
+  /**
+   * 每帧决策：求解落点、写进虚拟手柄、决定要不要冲刺。
+   * @param {object} game Game 实例
+   * @param {number} dt 时间步（秒）
+   * @returns {void}
+   */
+  think(game, dt) {
+    if (!this.on) return;
+
+    // 手动输入永远优先：玩家一动，AI 立刻退出，而不是两边抢方向
+    if (this._manualInput()) { this.disengage(game, 'manual'); return; }
+
+    this.engaged += dt;
+
+    // ---- 换枪决策（0.6 秒评估一次，且要求连续两次同向）----
+    this._weaponTimer -= dt;
+    if (this._weaponTimer <= 0) {
+      this._weaponTimer = 0.6;
+      this._decideWeapon(game);
+    }
+
+    // ---- 求解落点 ----
+    const plan = this._solve(game);
+    this.goalX = plan.x;
+    this.goalY = plan.y;
+    this.danger = plan.danger;
+
+    // ---- 落点 → 虚拟指针目标 ----
+    // Player 的拖动是 x += (target - x) * (1 - exp(-FOLLOW·dt))，本质是"追点"而不是
+    // "按速度走"。把目标点固定在领先 lead 像素处时，稳态速度恰好等于 FOLLOW × lead。
+    // 取 lead = SPEED / FOLLOW，AI 的最大速度就与键盘玩家完全一致 —— 不靠手速占便宜。
+    const p = game.player;
+    const lead = CFG.PLAYER.SPEED / CFG.TOUCH.FOLLOW;
+    const dx = clamp(plan.x - p.x, -lead, lead);
+    const dy = clamp(plan.y - p.y, -lead, lead);
+
+    const ptr = this.input.pointer;
+    ptr.active = true;
+    ptr.targetX = clamp(p.x + dx, 0, CFG.W);
+    ptr.targetY = clamp(p.y + dy, 0, CFG.H);
+    // dx/dy 同时喂给机身倾斜与侧灯，让 AI 操作时的姿态和真人拖动看起来一样
+    ptr.dx = clamp(dx / lead, -1, 1);
+    ptr.dy = clamp(dy / lead, -1, 1);
+
+    // ---- 躲不掉就冲刺 ----
+    // 冲刺自带 0.22 秒无敌帧，是整套系统里唯一的"硬解"。
+    // 必须放在最后：dash() 会读 pointer.dx/dy 决定冲哪边，而上面刚写进去的航向
+    // 正好就是"全网格里最安全的方向"，于是冲刺也是朝安全处冲。
+    // （若 dx/dy 恰好都是 0，dash() 内部会退回"向上冲"，那是脱险方向的常见默认值。）
+    this.input._dash = false;
+    if (plan.danger >= CFG.AI.DASH_AT && p.dashCd <= 0 && !p.isDashing) {
+      this.input._dash = true;
+    }
+  },
+
+  /**
+   * 在候选网格上求解最优点。
+   * @param {object} game Game 实例
+   * @returns {{x:number,y:number,danger:number}} 落点与该点的危险度
+   *
+   * 目标函数 = 攻击收益 − 危险度 × SAFETY。
+   * 为什么把"躲"和"打"合成一个标量，而不是写成"先躲，安全了再打"两段式：
+   * 两段式会掉进"躲到绝对安全、但离所有敌机都很远"的僵局 —— 它不挨打，
+   * 也打不着人，于是靠漏怪扣命慢慢死。合成一个目标函数后，AI 会自然地选
+   * "在够安全的位置里挑最方便输出"的那一格。
+   */
+  _solve(game) {
+    const A = CFG.AI;
+    const p = game.player;
+    const x0 = p.r + CFG.PLAYER.MARGIN;
+    const x1 = CFG.W - p.r - CFG.PLAYER.MARGIN;
+    const y0 = CFG.H * A.Y_MIN_RATIO;
+    const y1 = CFG.H * A.Y_MAX_RATIO;
+
+    let bestScore = -Infinity;
+    let bx = p.x, by = p.y, bd = 0;
+
+    for (let r = 0; r < A.ROWS; r++) {
+      const y = A.ROWS === 1 ? (y0 + y1) / 2 : y0 + (y1 - y0) * r / (A.ROWS - 1);
+      for (let i = 0; i < A.SAMPLES; i++) {
+        const x = x0 + (x1 - x0) * i / (A.SAMPLES - 1);
+        const danger = this._danger(game, x, y);
+        const gain = this._gain(game, x, y);
+        const score = gain - danger * A.SAFETY;
+        if (score > bestScore) { bestScore = score; bx = x; by = y; bd = danger; }
+      }
+    }
+    return { x: bx, y: by, danger: bd };
+  },
+
+  /**
+   * 计算某个候选位置的危险度。
+   * @param {object} game Game 实例
+   * @param {number} x 候选横坐标
+   * @param {number} y 候选纵坐标
+   * @returns {number} 危险度（0 = 安全，越大越危险）
+   *
+   * 核心手法是"时间到命中"（time-to-hit），而不是"当前距离"：
+   *   对每颗敌弹求它飞到 y 这一行所需的时刻 t，再看那一刻它的横坐标离候选点多远。
+   *   于是"现在离我很远、但正朝我飞来"的弹会被正确算成威胁，
+   *   而"擦身而过、其实打不着我"的弹会被忽略 ——
+   *   后者正是"当前距离"模型最容易犯的错：AI 会被满屏的流弹吓得乱跑，
+   *   看起来躲得热闹，实际一直在放弃输出位。
+   * 紧迫度取 1/(t+0.08)：0.1 秒内命中的弹权重约为 1 秒后的 5 倍，
+   * 所以 AI 天然优先处理"马上要中的"，远处威胁只影响倾向。
+   */
+  _danger(game, x, y) {
+    const A = CFG.AI;
+    const p = game.player;
+    const decay = A.NEAR_MISS - 1;
+    let danger = 0;
+
+    // ---- 敌弹 ----
+    const bs = game.enemyBullets;
+    for (let i = 0; i < bs.length; i++) {
+      const b = bs[i];
+      const rr = p.r + b.r + A.MARGIN;
+      const t = Math.abs(b.vy) > 1e-3 ? (y - b.y) / b.vy : Infinity;
+      let dist, tt;
+      if (t > 0 && t <= A.HORIZON) {
+        dist = Math.abs(b.x + b.vx * t - x);   // 那一刻它正好在 y 这一行上
+        tt = t;
+      } else if (Math.abs(b.y - y) < rr + 20) {
+        // 不穿越这一行（横向平飞，或已经贴在同一高度）：
+        // 按"瞬时威胁"处理。漏掉这一支的话，Boss 的环形弹幕里
+        // 那些在本行横着飞的弹会被完全无视。
+        dist = Math.hypot(b.x - x, b.y - y);
+        tt = 0.05;
+      } else {
+        continue;
+      }
+      if (dist >= rr * A.NEAR_MISS) continue;
+      const near = dist <= rr ? 1 : 1 - (dist - rr) / (rr * decay);
+      danger += near / (tt + 0.08);
+    }
+
+    // ---- 敌机本体 ----
+    // 与敌弹同一套逻辑，只是它自己的坐标也在动（匀速下落 + 横向漂移，撞墙反弹不预测）
+    const es = game.enemies;
+    for (let i = 0; i < es.length; i++) {
+      const e = es[i];
+      const rr = p.r + e.r + A.MARGIN;
+      const t = e.speed > 1e-3 ? (y - e.y) / e.speed : Infinity;
+      let dist, tt;
+      if (t > 0 && t <= A.HORIZON) {
+        dist = Math.abs(e.x + e.vx * t - x);
+        tt = t;
+      } else if (Math.abs(e.y - y) < rr + 30) {
+        dist = Math.hypot(e.x - x, e.y - y);
+        tt = 0.05;
+      } else {
+        continue;
+      }
+      if (dist >= rr * A.NEAR_MISS) continue;
+      const near = dist <= rr ? 1 : 1 - (dist - rr) / (rr * decay);
+      danger += near / (tt + 0.08);
+    }
+
+    // ---- Boss 本体 ----
+    // 刻意 *不* 判定：它停在 y≈108、半径 46，而 AI 的纵向上界是 0.52H = 312，
+    // 纵向差至少 204，远大于两者判定半径之和（16+46），永远撞不到。
+    // 写上只是死代码，还会让后来人误以为这里需要考虑它。
+    return danger;
+  },
+
+  /**
+   * 计算某个候选位置的"攻击收益"。
+   * @param {object} game Game 实例
+   * @param {number} x 候选横坐标
+   * @param {number} y 候选纵坐标
+   * @returns {number} 收益（越大越值得去）
+   */
+  _gain(game, x, y) {
+    const A = CFG.AI;
+    const p = game.player;
+    // 命中宽度：激光是一条竖直光柱（判定用 box，比视觉更宽），
+    // 双列分左右两条弹道，单发只有一条细线 —— 站得越正，命中越稳。
+    const spread = p.weapon === 'laser' ? 30 : (p.weapon === 'twin' ? 38 : 18);
+    let gain = 0;
+
+    // ---- 敌机 ----
+    const es = game.enemies;
+    for (let i = 0; i < es.length; i++) {
+      const e = es[i];
+      if (e.y < 0) continue;   // 还没进场，打了也打不着
+      // 越接近底部越急：漏掉一架同样扣一命，所以击杀优先级必须跟着上涨。
+      // 这一项是 AI 不会退化成"只躲不打"的关键。
+      const rush = clamp((e.y - 120) / (CFG.H - 420), 0, 1);
+      const w = 0.4 + A.RUSH_BOTTOM * rush;
+      const off = e.x - x;
+      gain += w * Math.exp(-(off * off) / (2 * spread * spread));
+    }
+
+    // ---- Boss ----
+    if (game.boss && game.boss.entered) {
+      const off = game.boss.x - x;
+      const bs = p.weapon === 'laser' ? 80 : 50;   // 体型很宽，几乎不需要瞄准
+      gain += 1.1 * Math.exp(-(off * off) / (2 * bs * bs));
+    }
+
+    // ---- 道具 ----
+    // 权重远小于一次有效输出：道具是"顺手拿"，不值得为它穿过一片弹幕。
+    // 危险度那边有 SAFETY 倍率兜底，所以"安全时才去捡"是自动成立的，不必另写分支。
+    const us = game.powerups;
+    for (let i = 0; i < us.length; i++) {
+      const u = us[i];
+      const ox = u.x - x, oy = u.y - y;
+      gain += A.POWERUP_PULL * Math.exp(-(ox * ox + oy * oy) / (2 * 170 * 170));
+    }
+
+    // ---- 平滑项 ----
+    // 没有它，AI 会在两个几乎等价的空档之间来回抽搐（看起来像在发抖），
+    // 也会为了 0.001 的收益差横穿半个屏幕。
+    gain -= 0.18 * (Math.abs(x - p.x) / CFG.W + Math.abs(y - p.y) / CFG.H);
+
+    return gain;
+  },
+
+  /**
+   * 决定要不要换枪（0.6 秒评估一次，且要求连续两次意向一致）。
+   * @param {object} game Game 实例
+   * @returns {void}
+   * 为什么需要滞后：敌机数量在 2↔3 之间抖动时，按"当前数量"选枪会让 AI
+   * 每秒换好几次枪 —— 换枪会重置射击冷却（等于白掉输出），屏幕上的提示也会刷屏。
+   */
+  _decideWeapon(game) {
+    const p = game.player;
+    if (p.weapons.length <= 1) return;   // 只有一把枪，没有可评估的选项
+
+    let want;
+    if (game.boss && game.boss.entered) {
+      // Boss 血厚且体型宽 → 激光的持续输出最划算，而且几乎不可能打空
+      want = p.weapons.includes('laser') ? 'laser' : 'pulse';
+    } else {
+      const es = game.enemies;
+      let minX = Infinity, maxX = -Infinity, urgent = 0;
+      for (let i = 0; i < es.length; i++) {
+        const e = es[i];
+        if (e.y < 0) continue;
+        if (e.x < minX) minX = e.x;
+        if (e.x > maxX) maxX = e.x;
+        if (e.y > CFG.H * 0.55) urgent++;   // 已经压到下半屏的敌机
+      }
+      const wide = isFinite(minX) && (maxX - minX) > 130;
+      if (es.length >= 3 && wide && p.weapons.includes('twin')) want = 'twin';
+      else if (urgent >= 2 && p.weapons.includes('laser')) want = 'laser';
+      else want = 'pulse';
+    }
+    if (!p.weapons.includes(want)) want = 'pulse';
+
+    // 滞后判定：连续两次意向一致才真的切
+    if (want === this._wantWeapon) this._wantHits++;
+    else { this._wantWeapon = want; this._wantHits = 1; }
+
+    if (this._wantHits >= 2 && want !== p.weapon) game.switchWeapon(want);
+  }
 };
 
 /* ============================================================================
@@ -2751,6 +3172,23 @@ const Game = {
   // 结算界面上写"存活 60.0s"对玩家就是一句假话，所以另存一个不缩放的计时。
   realElapsed: 0,
 
+  /**
+   * 当前生效的输入源：AI 接管时是"虚拟手柄"，否则是真人输入。
+   * @returns {object} 一个与 Input 同形的输入对象
+   * 把它做成 getter 而不是在 update() 里临时判断，是为了让"谁是当前输入源"
+   * 只有一个答案 —— 否则开火这件事会被三个地方各判一次（发子弹、激光结算、
+   * 画激光光柱），只要有一处忘了跟着切，AI 接管时就会出现
+   * "实际在开火、但画面不画光柱"这种不报错的静默不一致。
+   */
+  get controlInput() {
+    return AutoPilot.on ? AutoPilot.input : Input;
+  },
+
+  /** @returns {boolean} 当前是否处于"开火中"，与输入源无关 */
+  get firing() {
+    return this.controlInput.shoot;
+  },
+
   /* ==========================================================================
    * 初始化：只做一次
    * ========================================================================== */
@@ -2838,9 +3276,11 @@ const Game = {
     this.touchDash = document.getElementById('touch-dash');
     this.touchWeapon = document.getElementById('touch-weapon');
     this.touchSpeed = document.getElementById('touch-speed');
+    this.touchAi = document.getElementById('touch-ai');
     this.touchDashText = document.getElementById('touch-dash-text');
     this.touchWeaponText = document.getElementById('touch-weapon-text');
     this.touchSpeedText = document.getElementById('touch-speed-text');
+    this.touchAiText = document.getElementById('touch-ai-text');
 
     // 按钮点击：先 blur() 再处理。
     // 为什么必须 blur：按钮被点击后会获得焦点，之后按空格浏览器会
@@ -2980,17 +3420,24 @@ const Game = {
     }
 
     // ---- 6) 玩家 ----
+    // 输入源只有一个切换点：AI 接管时换成"虚拟手柄"，其余分支一个字都不用改。
+    // 这是整个自动模式的实现基石 —— 走位插值、冲刺、开火冷却、激光结算
+    // 走的是和真人完全相同的那条路径，AI 没有第二套运动学，也就无从作弊。
+    const ctl = this.controlInput;
+    // 决策必须在 player.update 之前完成：它要把本帧的目标点写进虚拟手柄
+    if (AutoPilot.on) AutoPilot.think(this, dt);
+
     // 屏幕冲刺按钮走"一次性请求"通道：键盘 Shift 在 handleOneShotKey 里直接触发，
     // 指针这边则在这里被消费一次。放在 player.update 之前是有意的 ——
     // dash() 要用"当前"的拖动方向决定冲向哪边，晚一帧就会朝反方向冲出去。
-    if (Input.consumeDash() && this.player.dash(Input)) this.onDash();
+    if (ctl.consumeDash() && this.player.dash(ctl)) this.onDash();
 
-    this.player.update(dt, Input);
+    this.player.update(dt, ctl);
 
     // 按住空格连发：冷却由 Player 内部管理，冷却未结束时返回空数组。
     // Player.shoot() 返回的是"本次发射的所有子弹"，散射道具因此不需要
     // Game 知道任何细节 —— 拿到什么就往数组里塞什么。
-    if (Input.shoot) {
+    if (this.firing) {
       const shots = this.player.shoot();
       for (let i = 0; i < shots.length; i++) this.bullets.push(shots[i]);
     }
@@ -2999,7 +3446,7 @@ const Game = {
     // 它的伤害是"每帧按 DPS×dt 结算"，所以必须单独走一条通道，
     // 不能混进子弹数组（那样会在 60Hz 下每帧生成一颗子弹，既浪费又会把
     // 碰撞检测的复杂度从 O(敌×弹) 拉成 O(敌×60帧)）。
-    if (this.player.usingLaser && Input.shoot) this.applyLaserDamage(dt);
+    if (this.player.usingLaser && this.firing) this.applyLaserDamage(dt);
 
     // ---- 7) 引擎尾迹粒子 ----
     // 用节流而不是每帧发射：60 帧全发会让粒子池迅速塞满，
@@ -3829,7 +4276,9 @@ const Game = {
     // ---- 激光光柱：画在实体之后、飞船之前 ----
     // 顺序是有讲究的：压在敌人上面（否则会被精英敌的机体挡住，看不出在持续输出），
     // 但压在飞船下面（让机头接住光柱根部，视觉上"从枪口射出"而不是"盖在船上"）。
-    if (this.player.usingLaser && Input.shoot && this.state === 'playing') {
+    // 用 this.firing 而不是 Input.shoot：AI 接管时真人这边按着空格也没用，
+    // 而 AI 一直在开火 —— 光柱必须跟着真正生效的那个输入源走。
+    if (this.player.usingLaser && this.firing && this.state === 'playing') {
       this.drawLaser(ctx, p);
     }
 
@@ -4028,6 +4477,17 @@ const Game = {
       ctx.font = '700 16px Consolas, "Courier New", monospace';
       ctx.fillStyle = '#ffb457';
       ctx.fillText(CFG.SPEED.TAG, 190, 18);
+    }
+
+    // ---- AI 角标：与倍速角标同一行，往右顺延 ----
+    // 理由同倍速角标：AI 接管时分数会明显偏高，必须有一个一直挂着的线索
+    // 能解释"为什么"，否则玩家回头看到榜上高分只会怀疑计分坏了。
+    // 位置用"档位已知"的固定偏移，不用 measureText —— 精简沙箱（自检桩）
+    // 里的 ctx 没有 measureText，调用它会直接抛错。
+    if (AutoPilot.on) {
+      ctx.font = '700 16px Consolas, "Courier New", monospace';
+      ctx.fillStyle = '#b48cff';
+      ctx.fillText(CFG.AI.TAG, this.timeScale === CFG.SPEED.FAST ? 226 : 190, 18);
     }
 
     ctx.font = '12px Consolas, "Courier New", monospace';
@@ -4290,6 +4750,9 @@ const Game = {
     this.lastRank = 0;
 
     this.player.reset();
+    // AI 状态也要清（接管时长、换枪滞后计数、待执行的冲刺请求）。
+    // 注意它**不**改变开关本身：AI 是一个档位，换一局不该把它关掉。
+    AutoPilot.reset();
   },
 
   /* ==========================================================================
@@ -4302,6 +4765,27 @@ const Game = {
    * @returns {void}
    */
   handleOneShotKey(k) {
+    // I：开关 AI 自动模式。
+    // 放在最前面且不做状态限制 —— 它是档位开关（不是一次性动作），
+    // 在开始界面先设好"这局让 AI 打"再开局是正常用法，与 F 二倍速同一套考虑。
+    if (k === CFG.AI.KEY) {
+      AutoPilot.toggle(this);
+      return;
+    }
+
+    // 其余"操作类"按键都是明确的"我要自己玩"信号 → 先交还控制权，再执行动作。
+    // 为什么不并进 AutoPilot._manualInput()：那里只能看见"按键当前的状态"，
+    // 而这类键是"一次性意图"，按完就抬起来了，状态法抓不到。
+    // 刻意**不**包含空格/回车：它们在菜单上是"开始/重开"，把它当成夺权信号会导致
+    // "AI 打完一局 → 你按空格再来一局 → AI 却悄悄退出了"。真人对局中按住空格
+    // （开火）已经会通过状态检测夺回控制权，不缺这一条路径。
+    if (AutoPilot.on && (k === 'shift' || k === 'q' || k === 'tab' ||
+                         k === '1' || k === '2' || k === '3')) {
+      // 走 'toggle' 而不是 'manual'：玩家马上就会看到这个动作的结果，
+      // 再弹一条"已交还操作"只会和动作本身的反馈抢注意力。
+      AutoPilot.disengage(this, 'toggle');
+    }
+
     // R：任何非初始状态下都能重开
     if (k === 'r') {
       if (this.state !== 'ready') this.start();
@@ -4442,8 +4926,10 @@ const Game = {
       // 连击、道具、武器、Boss 是这局的核心玩法，玩家不看说明也得能注意到
       this.ovStats.innerHTML = this.best > 0
         ? '历史最高分 <b>' + this.best + '</b><br>' +
-          '<span style="font-size:.92em;opacity:.85">连击累积倍率（最高 x5）· 击落掉道具 · 3 种武器可切换 · 每 5 级 BOSS 战</span>'
-        : '连续击杀累积倍率 · 击落敌机掉落道具 · 每 5 级 BOSS 战';
+          '<span style="font-size:.92em;opacity:.85">连击累积倍率（最高 x5）· 击落掉道具 · 3 种武器可切换 · 每 5 级 BOSS 战<br>' +
+          '按 <b>I</b> 交给 AI 自动打（任意操作即可夺回）</span>'
+        : '连续击杀累积倍率 · 击落敌机掉落道具 · 每 5 级 BOSS 战<br>' +
+          '按 <b>I</b> 交给 AI 自动打（任意操作即可夺回）';
       this.ovBtn.textContent = '开始游戏';
 
     } else if (this.state === 'paused') {
@@ -4468,6 +4954,11 @@ const Game = {
         // 不解释一句的话，玩家第一反应会是"计分是不是坏了"
         (this.timeScale === CFG.SPEED.FAST
           ? ' · <b style="color:#ffb457">二倍速 ' + CFG.SPEED.TAG + '</b>'
+          : '') +
+        // AI 接管局同样要说明：尤其是"AI 打到 Lv.40 才死"这种成绩，
+        // 不标出来的话玩家会拿它去衡量自己，而这两件事根本不可比
+        (AutoPilot.on
+          ? ' · <b style="color:#b48cff">AI 接管 ' + CFG.AI.TAG + '</b>'
           : '') +
         '<br>' +
         // 进了榜就明确报出名次：这是排行榜最核心的反馈，不说出来等于没做
@@ -4509,7 +5000,7 @@ const Game = {
     // "一条没有细节的历史记录"塞进榜单 —— 否则老玩家一更新就会发现
     // 排行榜是空的，看起来像记录被清掉了。
     if (list.length === 0 && best > 0) {
-      list = [{ score: best, level: 0, elapsed: 0, ts: 0, sp: CFG.SPEED.NORMAL }];
+      list = [{ score: best, level: 0, elapsed: 0, ts: 0, sp: CFG.SPEED.NORMAL, ai: 0 }];
     }
 
     this.scores = list;
@@ -4541,12 +5032,16 @@ const Game = {
       // 不能写 (e.sp || 1)：改过存档的人塞个 999 进来，榜单上就会多出一个
       // 无法解释的"×999"，而清洗环节的价值恰恰在于不信任存档内容。
       const sp = Number(e.sp) === CFG.SPEED.FAST ? CFG.SPEED.FAST : CFG.SPEED.NORMAL;
+      // AI 标记同理：只认"恰好等于 1"，其余（含缺失、字符串、被改成 999）一律算真人局。
+      // 不能写 `e.ai ? 1 : 0` —— 那样连 "false"/"0" 这种字符串都会被判成 AI 局。
+      const ai = Number(e.ai) === 1 ? 1 : 0;
       out.push({
         score: score,
         level: (isFinite(level) && level > 0) ? level : 0,
         elapsed: (isFinite(elapsed) && elapsed > 0) ? elapsed : 0,
         ts: (isFinite(ts) && ts > 0) ? ts : 0,
-        sp: sp
+        sp: sp,
+        ai: ai
       });
     }
     out.sort((a, b) => b.score - a.score);
@@ -4567,7 +5062,12 @@ const Game = {
       ts: Date.now(),
       // 记录本局的倍速档位：榜单允许两种档位混排，但必须能一眼分辨，
       // 否则"×2 打出来的分"和"常速打出来的分"混在一起，这张榜就失去可比性。
-      sp: this.timeScale === CFG.SPEED.FAST ? CFG.SPEED.FAST : CFG.SPEED.NORMAL
+      sp: this.timeScale === CFG.SPEED.FAST ? CFG.SPEED.FAST : CFG.SPEED.NORMAL,
+      // AI 标记：接管局的成绩照样记，但必须标出来 ——
+      // 一个"完美走位"的 AI 挂在榜上而没有任何说明，这张榜对真人就失去意义了。
+      // 存档里存 1/0 而不是 true/false，与 sp 的存法保持一致，
+      // 清洗时统一用"只认恰好等于 1"的严格判定。
+      ai: AutoPilot.on ? 1 : 0
     };
 
     this.scores.push(entry);
@@ -4625,9 +5125,12 @@ const Game = {
       const spTag = e.sp === CFG.SPEED.FAST
         ? '<span class="sp">' + CFG.SPEED.TAG + '</span>'
         : '';
+      const aiTag = e.ai === 1
+        ? '<span class="ai">' + CFG.AI.TAG + '</span>'
+        : '';
       html += '<div class="brow' + now + '">' +
                 '<span class="rk">' + (i + 1) + '</span>' +
-                '<span class="sc">' + e.score + spTag + '</span>' +
+                '<span class="sc">' + e.score + spTag + aiTag + '</span>' +
                 '<span class="meta">' + meta + '</span>' +
               '</div>';
     }
@@ -4681,6 +5184,9 @@ const Game = {
       this.touchDash.addEventListener('pointerdown', (ev) => {
         ev.preventDefault();
         this.touchDash.blur();
+        // AI 接管期间点冲刺 = 明确的"我要自己操作" → 先交还控制权再执行。
+        // 若只是静默忽略，玩家会以为按钮坏了。
+        if (AutoPilot.on) AutoPilot.disengage(this, 'toggle');
         if (this.state === 'playing') Input.requestDash();
       }, { passive: false });
     }
@@ -4690,6 +5196,7 @@ const Game = {
       this.touchWeapon.addEventListener('pointerdown', (ev) => {
         ev.preventDefault();
         this.touchWeapon.blur();
+        if (AutoPilot.on) AutoPilot.disengage(this, 'toggle');
         if (this.state === 'playing') this.switchWeapon(null);
       }, { passive: false });
     }
@@ -4702,6 +5209,17 @@ const Game = {
         ev.preventDefault();
         this.touchSpeed.blur();
         this.toggleSpeed();
+      }, { passive: false });
+    }
+
+    // ---- AI 自动模式按钮 ----
+    // 与倍速按钮同一套：不限制 state，菜单上也能先开好再开局。
+    // 这是按 I 键的等价入口 —— 手机上没法按 I。
+    if (this.touchAi) {
+      this.touchAi.addEventListener('pointerdown', (ev) => {
+        ev.preventDefault();
+        this.touchAi.blur();
+        AutoPilot.toggle(this);
       }, { passive: false });
     }
   },
@@ -4730,7 +5248,7 @@ const Game = {
     // 画布底边。用 top + height 而不是 cr.bottom：
     // 精简环境（自检桩）只给 top/height，读 bottom 会得到 undefined → NaN。
     const canvasBottom = cr.top + cr.height;
-    const btns = [this.touchWeapon, this.touchSpeed, this.touchDash];
+    const btns = [this.touchWeapon, this.touchSpeed, this.touchAi, this.touchDash];
 
     let need = 0;   // 按钮从画布底边往上顶起的高度（CSS 像素）
     for (let i = 0; i < btns.length; i++) {
@@ -4792,6 +5310,18 @@ const Game = {
       this._speedOn = fast;
       this.touchSpeed.classList.toggle('on', fast);
     }
+
+    // AI 按钮显示"接管中/待机"两态。手机上玩家看不到 HUD 里那个紫色角标
+    // （字很小），按钮的点亮状态才是他判断"现在到底谁在操作"的主要依据。
+    const aiLabel = AutoPilot.on ? 'ON' : 'AI';
+    if (aiLabel !== this._aiLabel && this.touchAiText) {
+      this._aiLabel = aiLabel;
+      this.touchAiText.textContent = aiLabel;
+    }
+    if (AutoPilot.on !== this._aiOn && this.touchAi) {
+      this._aiOn = AutoPilot.on;
+      this.touchAi.classList.toggle('on', AutoPilot.on);
+    }
   }
 };
 
@@ -4824,6 +5354,7 @@ if (typeof window !== 'undefined') {
     game: Game,
     CFG: CFG,
     Input: Input,
+    AutoPilot: AutoPilot,
     classes: { Player, Bullet, Enemy, PowerUp, Boss, EnemyBullet, Shockwave, FloatText }
   };
 }

@@ -20,6 +20,9 @@
  *   K. store 预置 → 本地排行榜 Top5（排序 / 截断 / 名次 / 旧存档迁移 / 脏数据清洗）
  *   L. random=0.5 → 二倍速模式（档位切换 / 时间真的翻倍 / 步长仍被夹紧 /
  *                    HUD 角标 / 榜单 ×2 标记 / 真实存活计时 / 触屏按钮 / HUD 让位高度）
+ *   M. random=0.5 → AI 自动模式（开关 / 自动开火 / 主动躲弹（带对照组）/
+ *                    手动夺回 / 换枪滞后 / HUD 角标 / 榜单 AI 标记 / 档位跨局保留）
+ *   N. coarse=1  → AI 的触屏入口（圆钮开关、文字与点亮状态、布局桩覆盖率）
  */
 const fs = require('fs');
 const path = require('path');
@@ -62,12 +65,19 @@ function createEnv(randomValue, opts = {}) {
      这个函数看起来在跑、实际量的是假数据，等于没测。 */
   const BTN = 62;
   const btnTop = 600 - 14 - BTN;   // 底部一行：bottom 14px + 按钮高 62px
+  // 兜底矩形绝不能给 top: 0。这个坑刚踩过一次：新增 AI 按钮后忘了在这里声明，
+  // 它落到兜底分支上，于是"按钮顶边到画布底边"= 整个画布高度，
+  // 让位高度被算成 620（画布才 600 高）—— 测试确实"跑"了，量的是垃圾数据。
+  // 现在兜底改成"假设它也在底部那一行"，并把未声明的 id 记下来供断言检查。
+  const undeclaredBtns = [];
   const rectOf = (id) => {
     if (id === 'game') return { x: 0, y: 0, top: 0, left: 0, width: 800, height: 600 };
     if (id === 'touch-weapon') return { x: 14, y: btnTop, top: btnTop, left: 14, width: BTN, height: BTN };
     if (id === 'touch-speed')  return { x: 86, y: btnTop, top: btnTop, left: 86, width: BTN, height: BTN };
+    if (id === 'touch-ai')     return { x: 652, y: btnTop, top: btnTop, left: 652, width: BTN, height: BTN };
     if (id === 'touch-dash')   return { x: 724, y: btnTop, top: btnTop, left: 724, width: BTN, height: BTN };
-    return { x: 0, y: 0, top: 0, left: 0, width: BTN, height: BTN };
+    if (undeclaredBtns.indexOf(id) < 0) undeclaredBtns.push(id);
+    return { x: 0, y: btnTop, top: btnTop, left: 0, width: BTN, height: BTN };
   };
 
   const makeEl = (id) => {
@@ -127,10 +137,12 @@ function createEnv(randomValue, opts = {}) {
 
   return {
     fillTexts, arcRadii, store, win,
+    undeclaredBtns,
     el: (id) => documentStub.getElementById(id),
     G: hook.game,
     CFG: hook.CFG,
     Input: hook.Input,
+    AutoPilot: hook.AutoPilot,
     cls: () => hook.classes,
     dispatch(type, key, repeat = false) {
       (winListeners[type] || []).forEach((f) => f({ key, repeat, preventDefault() {} }));
@@ -1008,6 +1020,200 @@ console.log('\n场景 L：二倍速模式');
         '叠放 ' + stackedPad + 'px > 单排 ' + rowPad + 'px');
   check('单排布局下让位高度回到原值（+20 呼吸空间，未重复计算下边距）',
         G.hudBottomPad === rowPad, 'pad=' + G.hudBottomPad + 'px');
+}
+
+// ============================ 场景 M ============================
+console.log('\n场景 M：AI 自动模式');
+{
+  const env = createEnv(0.5);
+  const G = env.G, CFG = env.CFG, AI = env.AutoPilot, cls = env.cls();
+
+  check('默认不接管（AI 必须由玩家显式开启）', AI.on === false);
+  check('虚拟手柄已挂上钩子（否则下面所有断言都会静默失效）', !!AI && !!AI.input);
+
+  // ---- 开关：它是档位，不做状态限制 ----
+  env.step(2);
+  env.dispatch('keydown', 'i');
+  env.step(1);
+  check('开始界面上按 I 就能进入接管（与 F 二倍速同一套考虑）', AI.on === true);
+  env.dispatch('keydown', 'i');
+  env.step(1);
+  check('再按 I 交还操作', AI.on === false);
+
+  // ---- 开局后自动开火 ----
+  // 用 G.start() 而不是按空格开局：按空格会把 keys[' '] 置为按下状态，
+  // 而"按着空格"本身就会被判成手动输入把 AI 踢掉 —— 那是 M6 要单独测的东西。
+  AI.engage(G);
+  G.start();
+  env.step(1);
+  check('开局后仍处于接管状态', AI.on === true && G.state === 'playing');
+
+  let shotsFired = 0;
+  const origShoot = G.player.shoot.bind(G.player);
+  G.player.shoot = () => { const r = origShoot(); shotsFired += r.length; return r; };
+  env.step(30);
+  G.player.shoot = origShoot;
+  check('AI 在没有人按键的情况下自己开火', shotsFired > 0,
+        '0.5 秒内自动打出 ' + shotsFired + ' 发');
+
+  /* ---- 核心：AI 到底会不会躲 ----
+     造一个"必中"的局面：清空全场，只留三颗正对飞船头顶砸下来的敌弹。
+     关键是必须有对照组 —— 如果 AI 关闭时这个局面也不掉命，
+     那"AI 躲开了"这条断言就是空转的，它什么也没证明。
+     （这正是"一个不会失败的检查比没有检查更糟"的具体做法。） */
+  const origSpawning = G.updateSpawning;
+  const aimed = (frames, autoOn) => {
+    G.updateSpawning = () => {};        // 停掉自然刷怪，保证场面完全可控
+    G.enemies.length = 0;
+    G.enemyBullets.length = 0;
+    G.bullets.length = 0;
+    G.powerups.length = 0;
+    G.player.reset();
+    G.player.x = CFG.W / 2;
+    G.player.y = CFG.H * 0.72;
+    if (autoOn) AI.engage(G); else AI.disengage(G, 'toggle');
+    AI.reset();
+
+    const lives0 = G.player.lives;
+    const x0 = G.player.x;
+    for (let i = 0; i < 3; i++) {
+      G.enemyBullets.push(new cls.EnemyBullet(
+        CFG.W / 2, 120 + i * 40, 0, CFG.BOSS.BULLET_SPEED, '#ff3b5c'));
+    }
+    env.step(frames);
+    return { lives0, lives: G.player.lives, moved: Math.abs(G.player.x - x0) };
+  };
+
+  const ctrl = aimed(150, false);
+  check('对照组：AI 关闭时同样局面必然掉命（证明下面那条断言不是空转）',
+        ctrl.lives < ctrl.lives0,
+        '生命 ' + ctrl.lives0 + ' → ' + ctrl.lives);
+
+  const auto = aimed(150, true);
+  check('AI 接管时同样局面毫发无伤',
+        auto.lives === auto.lives0,
+        '生命 ' + auto.lives0 + ' → ' + auto.lives);
+  check('而且是靠横向移动躲开的，不是站在原地侥幸没事',
+        auto.moved > 30, '横向位移 ' + auto.moved.toFixed(1) + 'px');
+  check('躲开之后没有一路逃到角落（平滑项在起作用）',
+        auto.moved < 380, '横向位移 ' + auto.moved.toFixed(1) + 'px');
+
+  G.updateSpawning = origSpawning;
+
+  // ---- 手动输入立刻夺回 ----
+  G.player.x = 300;
+  G.player.y = CFG.H * 0.72;
+  AI.engage(G);
+  env.step(1);
+  env.dispatch('keydown', 'd');
+  env.step(1);
+  check('玩家一按键（D 右移）AI 立刻交还控制权', AI.on === false);
+  const xBefore = G.player.x;
+  env.step(20);
+  check('交还之后飞船确实听键盘的', G.player.x > xBefore + 20,
+        xBefore.toFixed(1) + ' → ' + G.player.x.toFixed(1));
+  env.dispatch('keyup', 'd');
+  env.step(1);
+
+  // ---- 摁着空格也会夺回（这条走的是"状态检测"而不是一次性按键）----
+  AI.engage(G);
+  env.step(1);
+  env.dispatch('keydown', ' ');
+  env.step(1);
+  check('按住空格（开火）也算手动输入，同样夺回控制权', AI.on === false);
+  env.dispatch('keyup', ' ');
+  env.step(1);
+
+  // ---- 换枪：必须有滞后，否则会在边界上反复横跳 ----
+  G.player.weapons = ['pulse', 'twin', 'laser'];
+  G.player.weapon = 'pulse';
+  G.enemies.length = 0;
+  for (let i = 0; i < 3; i++) {
+    const e = new cls.Enemy(1);
+    e.x = 100 + i * 300;          // 横向铺开 → 应该选双列
+    e.y = 180 - i * 10;
+    e.vx = 0;
+    G.enemies.push(e);
+  }
+  AI._wantWeapon = '';
+  AI._wantHits = 0;
+  AI._decideWeapon(G);
+  check('换枪有滞后：第一次评估不立刻换（防止在 2↔3 架的边界上反复横跳）',
+        G.player.weapon === 'pulse', 'weapon = ' + G.player.weapon);
+  AI._decideWeapon(G);
+  check('同一判断连续两次成立后才真的换枪', G.player.weapon === 'twin',
+        'weapon = ' + G.player.weapon);
+
+  // ---- HUD 角标 ----
+  AI.engage(G);
+  env.clear();
+  env.step(1);
+  check('接管时 HUD 显示 AI 角标', env.fillTexts.indexOf(CFG.AI.TAG) >= 0);
+  check('SCORE 那一行没被角标污染（自检靠它反解分数）', env.score() !== null,
+        'score = ' + env.score());
+
+  // ---- 榜单：接管局必须带标记 ----
+  // 不标的话，"完美走位的 AI 打出来的分"和真人成绩混在同一张榜上，
+  // 这张榜对真人就彻底失去参照意义了 —— 和倍速标记是同一类问题。
+  G.enemies.length = 0;
+  G.score = 9999;
+  G.gameOver();
+
+  const saved = JSON.parse(env.store['space-line-scores'] || '[]');
+  check('接管局的成绩被记录为 ai=1', saved.length > 0 && saved[0].ai === 1,
+        JSON.stringify(saved[0]));
+  check('结算界面点名了本局是 AI 接管', env.el('ov-stats').innerHTML.indexOf('AI') >= 0);
+  check('榜单把 AI 标记渲染出来', env.el('ov-board').innerHTML.indexOf('class="ai"') >= 0);
+
+  const cleaned = G.sanitizeScores([
+    { score: 100, ai: 1 },
+    { score: 90, ai: 999 },
+    { score: 80, ai: 'x' },
+    { score: 70 }
+  ]);
+  check('ai 只认 1，被篡改的值与缺失一律算真人局',
+        cleaned[0].ai === 1 && cleaned[1].ai === 0 &&
+        cleaned[2].ai === 0 && cleaned[3].ai === 0,
+        cleaned.map((e) => e.ai).join(' / '));
+
+  // ---- 重开一局不该把档位关掉 ----
+  AI.engage(G);
+  G.start();
+  env.step(1);
+  check('重开一局后仍保持接管（它是档位，不是本局状态）', AI.on === true);
+  check('重开一局后接管计时归零', AI.engaged < 0.1, 'engaged = ' + AI.engaged.toFixed(3));
+}
+
+// ============================ 场景 N ============================
+console.log('\n场景 N：AI 的触屏入口');
+{
+  const env = createEnv(0.5, { coarse: true, touchPoints: 5 });
+  const G = env.G, AI = env.AutoPilot;
+  env.step(3);
+
+  check('触屏模式出现 AI 按钮', !!env.el('touch-ai'));
+  env.el('touch-ai').fire('pointerdown', { preventDefault() {} });
+  env.step(1);
+  check('点 AI 圆钮就能进入接管（手机上按不了 I）', AI.on === true);
+  check('按钮文字变成 ON，玩家一眼知道现在谁在操作',
+        env.el('touch-ai-text').textContent === 'ON',
+        '文字 = ' + env.el('touch-ai-text').textContent);
+  check('接管时按钮点亮（.on）', env.el('touch-ai').classList.contains('on') === true);
+
+  env.el('touch-ai').fire('pointerdown', { preventDefault() {} });
+  env.step(1);
+  check('再点一次交还，文字与点亮状态一起复位',
+        AI.on === false &&
+        env.el('touch-ai-text').textContent === 'AI' &&
+        env.el('touch-ai').classList.contains('on') === false);
+
+  /* ---- 布局桩的覆盖率 ----
+     这条是给"以后再加按钮"准备的：measureTouchPad 会遍历 game 上声明的按钮，
+     只要有一个按钮没在桩里声明几何，它就会掉进兜底分支、量出垃圾数据。
+     这个坑刚踩过一次（AI 按钮忘了声明 → 让位高度算成 620px，画布才 600 高）。 */
+  G.measureTouchPad();
+  check('自检的布局桩已覆盖页面上所有触屏按钮',
+        env.undeclaredBtns.length === 0, env.undeclaredBtns.join(', '));
 }
 
 console.log(fail === 0

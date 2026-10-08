@@ -2,7 +2,7 @@
  * 真实浏览器验证：用 headless Edge + CDP 打开 index.html，全程零控制台错误。
  *
  * 分两个阶段，因为"桌面"和"触屏"在同一个页面里是两套分支，必须分别起一次：
- *   阶段一（桌面）—— 键盘开局/移动/暂停、激光武器、BOSS 三阶段、排行榜迁移
+ *   阶段一（桌面）—— 键盘开局/移动/暂停、激光武器、BOSS 三阶段、排行榜迁移、AI 接管
  *   阶段二（触屏）—— 用真实触摸事件（Input.dispatchTouchEvent）驱动
  *                    相对拖动、自动开火、屏幕冲刺按钮、倍速按钮、
  *                    以及三个按钮两两不重叠 / 底部 HUD 让位高度是否真的够
@@ -30,11 +30,21 @@ const check = (label, ok, extra = '') => {
 };
 
 (async () => {
+  /* ---- 每次运行都从干净的 profile 开始 ----
+     ⚠️ 这里曾经埋着一个"测试不可重复运行"的坑：--user-data-dir 是持久目录，
+     localStorage 会跨运行保留，而脚本只在阶段二清过 storage。
+     于是"上一轮跑出过成绩"会让下一轮阶段一的两条断言直接失败
+     （空存档时排行榜应隐藏 / 结束后成绩条数应为 1），
+     表现为"排行榜坏了"，实际是测试自己带进来的脏数据。
+     解法不是每次手工删目录：在启动浏览器之前直接清掉。 */
+  const profile = path.join(CWD, '_edgeprofile');
+  fs.rmSync(profile, { recursive: true, force: true });
+
   const proc = spawn(EDGE, [
     '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
     '--touch-events=enabled',
     '--remote-debugging-port=' + PORT,
-    '--user-data-dir=' + path.join(CWD, '_edgeprofile'),
+    '--user-data-dir=' + profile,
     '--window-size=1100,860',
     'about:blank',
   ], { stdio: 'ignore' });
@@ -245,6 +255,52 @@ const check = (label, ok, extra = '') => {
   await shot('_shot_3_paused.png');
 
   /* ======================================================================
+   * 阶段一之二：AI 自动模式（真实浏览器 + 真实键盘）
+   * 自检里的场景 M 跑在自搭的 DOM 桩上；这里要证明的是真机行为：
+   * 按 I 真的会接管、它真的把飞船开动了、而且手动输入真的能夺回来。
+   * ==================================================================== */
+  await key('keyDown', 'r', 'KeyR', 82);
+  await key('keyUp', 'r', 'KeyR', 82);
+  await sleep(400);
+  check('重开后回到进行中状态', (await evaluate('__SpaceLine.game.state')) === 'playing',
+        'state=' + (await evaluate('__SpaceLine.game.state')));
+
+  await key('keyDown', 'i', 'KeyI', 73);
+  await key('keyUp', 'i', 'KeyI', 73);
+  await sleep(200);
+  check('真机按 I 进入 AI 接管', (await evaluate('__SpaceLine.AutoPilot.on')) === true);
+  check('接管时自动开火，而玩家并没有按着空格',
+        (await evaluate('__SpaceLine.game.firing')) === true &&
+        (await evaluate('Boolean(__SpaceLine.Input.keys[" "])')) === false,
+        'firing=' + (await evaluate('__SpaceLine.game.firing')));
+
+  // 采样 1.5 秒：AI 必须真的在动，而且不能站着挨打
+  const xs = [];
+  const aiLives0 = await evaluate('__SpaceLine.game.player.lives');
+  for (let i = 0; i < 15; i++) {
+    xs.push(await evaluate('__SpaceLine.game.player.x'));
+    await sleep(100);
+  }
+  const aiMoved = Math.max.apply(null, xs) - Math.min.apply(null, xs);
+  check('AI 真的在开动飞船（横向位置持续变化）', aiMoved > 5,
+        '横向活动范围 ' + aiMoved.toFixed(1) + 'px');
+  check('AI 接管期间没有掉命',
+        (await evaluate('__SpaceLine.game.player.lives')) === aiLives0,
+        aiLives0 + ' → ' + (await evaluate('__SpaceLine.game.player.lives')));
+  check('AI 接管期间游戏正常推进',
+        (await evaluate('__SpaceLine.game.realElapsed')) > 1 &&
+        (await evaluate('__SpaceLine.game.state')) === 'playing',
+        'realElapsed=' + (await evaluate('__SpaceLine.game.realElapsed')).toFixed(2) + 's');
+  await shot('_shot_11_ai_desktop.png');
+
+  // 手动夺回：真机上按一下方向键
+  await key('keyDown', 'd', 'KeyD', 68);
+  await sleep(250);
+  check('真机按方向键立刻夺回控制权', (await evaluate('__SpaceLine.AutoPilot.on')) === false);
+  await key('keyUp', 'd', 'KeyD', 68);
+  await sleep(200);
+
+  /* ======================================================================
    * 阶段二：触屏（真实触摸事件 + 手机视口）
    * ==================================================================== */
   console.log('\n阶段二：触屏（真实触摸事件 + 390×844 手机视口）');
@@ -274,7 +330,7 @@ const check = (label, ok, extra = '') => {
   // selftest 用的是自搭的 DOM 桩（矩形是写死的），所以"按钮之间会不会互相压住"
   // 这件事只有真实布局引擎才算得出来。
   const speedLayout = await evaluate(`(function(){
-    var ids=['touch-weapon','touch-speed','touch-dash'];
+    var ids=['touch-weapon','touch-speed','touch-ai','touch-dash'];
     var rs=ids.map(function(i){return document.getElementById(i).getBoundingClientRect();});
     for (var i=0;i<rs.length;i++){
       if (rs[i].width<40||rs[i].height<40)
@@ -288,7 +344,32 @@ const check = (label, ok, extra = '') => {
     }
     return "ok";
   })()`);
-  check('三个屏幕按钮尺寸正常且两两不重叠', speedLayout === 'ok', speedLayout);
+  check('四个屏幕按钮尺寸正常且两两不重叠', speedLayout === 'ok', speedLayout);
+
+  /* ---- 底部中央必须留白给拖动 ----
+     这条是真实事故留下的断言：AI 按钮一度排在左侧簇的第三位（left:158），
+     而竖屏画布只有 367 CSS px 宽 —— 它正好压在"飞船正下方"这个拖动起点上
+     （0.5w ≈ 183）。后果不是报错，而是手指按下去点在按钮上、画布收不到拖动，
+     表现为"飞船几乎不跟着手指走"。
+     拖动是全触摸操作的基础，所以底部中央的留白要当成一条不变量守住。 */
+  const centerFree = await evaluate(`(function(){
+    var c=document.getElementById("game").getBoundingClientRect();
+    var ids=['touch-weapon','touch-speed','touch-ai','touch-dash'];
+    var rs=ids.map(function(i){return document.getElementById(i).getBoundingClientRect();});
+    var hits=[];
+    [0.42,0.5,0.58].forEach(function(fx){
+      var px=c.left+c.width*fx, py=c.top+c.height*0.9;
+      for (var i=0;i<rs.length;i++){
+        var r=rs[i];
+        if (px>=r.left && px<=r.right && py>=r.top && py<=r.bottom) {
+          if (hits.indexOf(ids[i])<0) hits.push(ids[i]);
+        }
+      }
+    });
+    return hits.length ? hits.join(',') : "ok";
+  })()`);
+  check('画布底部中央没有被任何按钮占住（拖动起点必须可用）',
+        centerFree === 'ok', '被占住的位置上命中 ' + centerFree);
 
   /* ---- 底部 HUD 的让位高度是否真的够 ----
      这一条是为一个实拍截图里发现的 bug 立的：倍速按钮叠在换枪按钮上方时，
@@ -299,7 +380,7 @@ const check = (label, ok, extra = '') => {
     var G=__SpaceLine.game;
     var c=document.getElementById("game").getBoundingClientRect();
     var need=0;
-    ["touch-weapon","touch-speed","touch-dash"].forEach(function(i){
+    ["touch-weapon","touch-speed","touch-ai","touch-dash"].forEach(function(i){
       var up=(c.top+c.height)-document.getElementById(i).getBoundingClientRect().top;
       if (up>need) need=up;
     });
@@ -410,6 +491,33 @@ const check = (label, ok, extra = '') => {
   check('再按一次回到常速（档位可逆）',
         (await evaluate('__SpaceLine.game.timeScale')) === 1 &&
         (await evaluate('document.getElementById("touch-speed-text").textContent')) === '1×');
+
+  // ---- AI 圆钮：手机上没有 I 键，这是唯一入口 ----
+  // 与倍速按钮一样，用真实触摸事件打在按钮的实测中心点上。
+  const aib = JSON.parse(await evaluate(`(function(){
+    var r=document.getElementById("touch-ai").getBoundingClientRect();
+    return JSON.stringify({x:r.x+r.width/2,y:r.y+r.height/2});
+  })()`));
+  await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: aib.x, y: aib.y, id: 1 }] });
+  await sleep(150);
+  await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await sleep(300);
+  check('真实触摸按下 AI 按钮 → 进入接管',
+        (await evaluate('__SpaceLine.AutoPilot.on')) === true);
+  check('AI 按钮文字变成 ON 并点亮',
+        (await evaluate('document.getElementById("touch-ai-text").textContent')) === 'ON' &&
+        (await evaluate('document.getElementById("touch-ai").classList.contains("on")')) === true);
+
+  // 触屏上没有方向键，"夺回控制权"这条路径必须靠真手指 —— 顺带把这条也验了
+  await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: tx0, y: ty0, id: 1 }] });
+  await sleep(250);
+  check('手指一碰画布（开始拖动）AI 就交还控制权',
+        (await evaluate('__SpaceLine.AutoPilot.on')) === false);
+  await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await sleep(200);
+  check('交还后 AI 按钮文字与点亮状态一起复位',
+        (await evaluate('document.getElementById("touch-ai-text").textContent')) === 'AI' &&
+        (await evaluate('document.getElementById("touch-ai").classList.contains("on")')) === false);
 
   // ---- 触屏下的实际画面 ----
   await evaluate(`(function(){
