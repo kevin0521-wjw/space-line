@@ -147,6 +147,7 @@ const INSTALL = `
     D.maxDanger = 0; D.hist = [0, 0, 0, 0, 0]; D.dashableDanger = [];
     D.hereDanger = []; D.yHist = [0, 0, 0, 0, 0];
     D.prevDashCd = 0;
+    D.killLv = {}; D.leakLv = {}; D.spawnLv = {}; D.secLv = {}; D.weaponLv = {};
 
     // 包一层 think()：它返回时虚拟手柄上就写着本帧的冲刺决定，
     // 而 consumeDash() 要等 Game.update 里下一步才消费 —— 正好是唯一的观察窗口。
@@ -202,10 +203,22 @@ const INSTALL = `
       const cur = snap();
       if (D.prev) {
         if (cur.lives < D.prev.lives) classify(D.prev);
-        // 漏怪计数：pastBottom 的敌机在本帧消失
+        /* ---- 吞吐统计：区分"打死"与"漏掉"，并按等级分桶 ----
+           这是判断"漏怪是决策缺陷还是难度饱和"的唯一硬证据：
+           只要某一级的 击杀/秒 明显低于 刷怪/秒，那一级漏多少都是数学必然，
+           再怎么调决策也救不回来 —— 这两件事的改进方向完全相反。 */
+        const lv = G.level;
+        D.secLv[lv] = (D.secLv[lv] || 0) + 1 / 60;
         for (const e of D.prev.enemies) {
-          if (e.pastBottom && !G.enemies.includes(e)) D.leaks++;
+          if (G.enemies.includes(e)) continue;
+          if (e.pastBottom) { D.leaks++; D.leakLv[lv] = (D.leakLv[lv] || 0) + 1; }
+          else D.killLv[lv] = (D.killLv[lv] || 0) + 1;
         }
+        for (const e of cur.enemies) {
+          if (!D.prev.enemies.includes(e)) D.spawnLv[lv] = (D.spawnLv[lv] || 0) + 1;
+        }
+        D.weaponLv[lv] = D.weaponLv[lv] || {};
+        D.weaponLv[lv][cur.weapon] = (D.weaponLv[lv][cur.weapon] || 0) + 1;
       }
       // 冲刺生效判定：dash() 会把 dashCd 从 0 直接拉到满冷却，一帧内跳变 ≈1.1s
       if (cur.dashCd > D.prevDashCd + 0.5) D.dashOk++;
@@ -247,6 +260,8 @@ const INSTALL = `
       leaks: D.leaks,
       dashReq: D.dashReq, dashOk: D.dashOk, missedDash: D.missedDash,
       dashCrisis: D.dashCrisis, dashRush: D.dashRush,
+      killLv: D.killLv, leakLv: D.leakLv, spawnLv: D.spawnLv,
+      secLv: D.secLv, weaponLv: D.weaponLv,
       maxDanger: Number(D.maxDanger.toFixed(2)),
       hist: D.hist,
       yHist: D.yHist,
@@ -334,6 +349,12 @@ const INSTALL = `
 
   const all = [];
   for (let round = 1; round <= ROUNDS; round++) {
+    /* 同进程交替 A/B：奇数局用新策略、偶数局用旧策略。
+       必须这样做 —— 武器是道具随机解锁的，两次独立运行的武器组合很可能不同
+       （实测撞到过一局有激光没双列、另一局相反），直接跨运行比会得到假结论。
+       交替能让这份随机性在两臂上均摊。 */
+    const arm = (round % 2 === 1) ? 'band' : 'legacy';
+    await evaluate('__SpaceLine.AutoPilot.weaponPolicy = ' + JSON.stringify(arm));
     // 重开一局（R 键），再按 I 交给 AI
     await key('keyDown', 'r', 'KeyR', 82); await key('keyUp', 'r', 'KeyR', 82);
     await sleep(120);
@@ -351,7 +372,7 @@ const INSTALL = `
     }
     const on = await evaluate('__SpaceLine.AutoPilot.on');
 
-    process.stdout.write('第 ' + round + ' 局：AI=' + on + ' 模拟中');
+    process.stdout.write('第 ' + round + ' 局[' + arm + ']：AI=' + on + ' 模拟中');
     let sec = 0;
 
     /* ---- 顺手拍一张"AI 忙起来"的照片 ----
@@ -379,6 +400,7 @@ const INSTALL = `
     process.stdout.write('\n');
 
     const rep = JSON.parse(await evaluate('__diag.report()'));
+    rep.arm = arm;
     all.push(rep);
   }
 
@@ -423,6 +445,103 @@ const INSTALL = `
     const bar = '█'.repeat(Math.round(v / total * 30));
     console.log('  ' + k.padEnd(12) + String(v).padStart(3) + ' 次  ' + (v / total * 100).toFixed(0).padStart(3) + '%  ' + bar);
   });
+
+  console.log('\n---------------- A/B：换枪策略（按击杀带宽 vs 旧门槛）----------------');
+  {
+    const arms = {};
+    all.forEach((r) => {
+      const a = r.arm || '?';
+      arms[a] = arms[a] || { games: 0, surv: [], score: [], leaks: [], sec: {}, kill: {}, spawn: {} };
+      const A = arms[a];
+      A.games++;
+      A.surv.push(r.elapsed);
+      A.score.push(r.score);
+      A.leaks.push(r.leaks);
+      const kl = r.killLv || {}, spl = r.spawnLv || {}, tl = r.secLv || {};
+      for (const k in tl) {
+        A.sec[k] = (A.sec[k] || 0) + tl[k];
+        A.kill[k] = (A.kill[k] || 0) + (kl[k] || 0);
+        A.spawn[k] = (A.spawn[k] || 0) + (spl[k] || 0);
+      }
+    });
+    const avg = (a) => a.reduce((x, y) => x + y, 0) / (a.length || 1);
+    console.log('   策略        局数   平均存活   平均得分   平均漏怪   Lv.11缺口   Lv.12缺口');
+    Object.keys(arms).sort().forEach((k) => {
+      const A = arms[k];
+      const gapAt = (lv) => {
+        const sec = A.sec[lv] || 0;
+        if (sec < 10) return '样本不足';
+        const g = (A.spawn[lv] - A.kill[lv]) / sec;
+        return (g >= 0 ? '缺 ' : '富余') + Math.abs(g).toFixed(2) + '/秒';
+      };
+      console.log('   ' + k.padEnd(10)
+        + String(A.games).padStart(5)
+        + (avg(A.surv).toFixed(1) + 's').padStart(11)
+        + String(Math.round(avg(A.score))).padStart(11)
+        + (avg(A.leaks).toFixed(1) + '架').padStart(11)
+        + gapAt(11).padStart(13)
+        + gapAt(12).padStart(13));
+    });
+    const b = arms.band, l = arms.legacy;
+    if (b && l) {
+      const ds = avg(b.surv) - avg(l.surv);
+      const dg = avg(b.score) - avg(l.score);
+      console.log();
+      console.log('   差值：新 - 旧 = 存活 ' + (ds >= 0 ? '+' : '') + ds.toFixed(1) + 's'
+        + ' ・ 得分 ' + (dg >= 0 ? '+' : '') + Math.round(dg));
+      console.log('   ⚠️ 局数很少，这个差值只够看**方向**是否一致，不足以当结论；');
+      console.log('      要下结论得把 ROUNDS 提到 20+ 再看。');
+    }
+  }
+
+  console.log('\n---------------- 吞吐：击杀 vs 刷怪（按等级）----------------');
+  console.log('（这是判定"漏怪是决策缺陷还是难度饱和"的硬证据：');
+  console.log('  击杀/秒 明显低于 刷怪/秒 的等级，漏多少都是数学必然，调决策救不回来）');
+  {
+    const K = {}, L = {}, S = {}, T = {};
+    all.forEach((r) => {
+      for (const k in (r.killLv || {})) K[k] = (K[k] || 0) + r.killLv[k];
+      for (const k in (r.leakLv || {})) L[k] = (L[k] || 0) + r.leakLv[k];
+      for (const k in (r.spawnLv || {})) S[k] = (S[k] || 0) + r.spawnLv[k];
+      for (const k in (r.secLv || {})) T[k] = (T[k] || 0) + r.secLv[k];
+    });
+    const lvs = Object.keys(T).map(Number).sort((a, b) => a - b);
+    console.log('   等级   在场秒   刷怪/秒   击杀/秒   漏怪/秒   漏掉率   吞吐缺口');
+    for (const lv of lvs) {
+      const sec = T[lv] || 0;
+      if (sec < 3) continue;                      // 停留太短的等级样本不足，不列
+      const s = (S[lv] || 0) / sec, k = (K[lv] || 0) / sec, l = (L[lv] || 0) / sec;
+      const leakRate = (s > 0) ? l / s : 0;
+      const gap = s - k;
+      console.log('   Lv.' + String(lv).padEnd(4)
+        + sec.toFixed(0).padStart(7)
+        + s.toFixed(2).padStart(10)
+        + k.toFixed(2).padStart(9)
+        + l.toFixed(2).padStart(9)
+        + (leakRate * 100).toFixed(0).padStart(8) + '%'
+        + (gap > 0 ? '   缺 ' + gap.toFixed(2) + '/秒' : '   ✅ 够打'));
+    }
+    console.log();
+    console.log('   读法：Lv.1~8 的「吞吐缺口」若为负或接近 0，说明 AI 打得完、漏怪是决策问题；');
+    console.log('         Lv.9+ 若缺口明显为正，说明那一级刷怪速度已超过本机（单航道 + 340px/s）');
+    console.log('         的物理处理上限 —— 那是难度饱和，不该再拿调参去治。');
+    console.log();
+    const W = {};
+    all.forEach((r) => {
+      for (const lv in (r.weaponLv || {})) {
+        W[lv] = W[lv] || {};
+        for (const w in r.weaponLv[lv]) W[lv][w] = (W[lv][w] || 0) + r.weaponLv[lv][w];
+      }
+    });
+    console.log('---------------- 武器使用分布（按等级，占该级帧数）----------------');
+    console.log('   等级   单发   双列   激光   （看宽带武器到底有没有被用上）');
+    Object.keys(W).map(Number).sort((a, b) => a - b).forEach((lv) => {
+      if ((T[lv] || 0) * 60 < 180) return;         // 停留不足 3 秒的等级不列
+      const tot = Object.values(W[lv]).reduce((a, b) => a + b, 0) || 1;
+      const pc = (w) => String(((W[lv][w] || 0) / tot * 100).toFixed(0) + '%').padStart(5);
+      console.log('   Lv.' + String(lv).padEnd(4) + pc('pulse') + pc('twin') + pc('laser'));
+    });
+  }
 
   console.log('\n---------------- 漏怪归因 ----------------');
   const leaks = all.flatMap((r) => r.events.filter((e) => e.leakGap !== null));

@@ -1084,6 +1084,21 @@ const AutoPilot = {
   _wantWeapon: '',    // 上一次的换枪意向（用于滞后判定，避免在边界上反复横跳）
   _wantHits: 0,
 
+  /* 换枪策略开关（默认 'legacy'）。另一支 'band' 是**已实测更差**的变体，
+     保留仅供 `verify/aitest.js` 的同进程 A/B 复现那次结论，勿在生产里启用。
+
+     ⚠️ 这里记一次"推理错了、实验赢了"的经过，值得留着提醒：
+     我曾把门槛改成"有 ≥2 个真正打得到的目标就用双列"，理由是
+     "实测 Lv.12 吞吐只差 0.30 架/秒，而双列的击杀带 60px 比单发 38px 宽 1.58 倍，
+       所以瓶颈是带宽、不是火力（脉冲 7.7 发/秒 vs 需求 2.5，富余 3 倍）"。
+     ——**这个推理是错的。** 同进程交替 A/B（各 5 局、武器随机解锁在两臂上均摊）实测：
+          平均存活 196.3s → 160.1s ・ 平均得分 20340 → 14225
+     真正的原因是**双列冷却 0.17s 比单发 0.13s 贵 30%**，而两条弹道只差 22px，
+     对单个目标纯亏。瓶颈不是"走廊多宽"，是"扫过时能命中多少发" ——
+     多花的冷却直接换成了漏怪。教训：单次"相关性"（带宽宽 ⇒ 该用双列）
+     很容易被讲成因果，必须做受控 A/B 才知道方向。 */
+  weaponPolicy: 'legacy',   // 'legacy'（默认，实测更好）| 'band'（已实测更差，仅供对照）
+
   /* ---- 虚拟手柄 ----
      接口必须与 Input 严格同形。Game 只用到这几样：
        left/right/up/down · pointer{active,targetX,targetY,dx,dy} · shoot · consumeDash()
@@ -1498,18 +1513,29 @@ const AutoPilot = {
       want = p.weapons.includes('laser') ? 'laser' : 'pulse';
     } else {
       const es = game.enemies;
-      let minX = Infinity, maxX = -Infinity, urgent = 0;
+      let engaged = 0, urgent = 0, minX = Infinity, maxX = -Infinity;
       for (let i = 0; i < es.length; i++) {
         const e = es[i];
         if (e.y < 0) continue;
+        engaged++;
         if (e.x < minX) minX = e.x;
         if (e.x > maxX) maxX = e.x;
         if (e.y > CFG.H * 0.55) urgent++;   // 已经压到下半屏的敌机
       }
       const wide = isFinite(minX) && (maxX - minX) > 130;
-      if (es.length >= 3 && wide && p.weapons.includes('twin')) want = 'twin';
-      else if (urgent >= 2 && p.weapons.includes('laser')) want = 'laser';
-      else want = 'pulse';
+      if (this.weaponPolicy === 'band') {
+        // 已实测更差的变体，保留仅为让 A/B 可复现。理由见 weaponPolicy 处的注释。
+        if (engaged >= 2 && p.weapons.includes('twin')) want = 'twin';
+        else if (urgent >= 2 && p.weapons.includes('laser')) want = 'laser';
+        else want = 'pulse';
+      } else {
+        // 门槛是"≥3 个且分散 >130px"。这里的 `es.length` 确实把 y<0 的敌机也算进去了，
+        // 但实测（见上）放宽它反而更差，所以**保持原样** ——
+        // 看着不严谨的门槛，未必是错的；改它之前先做受控 A/B。
+        if (es.length >= 3 && wide && p.weapons.includes('twin')) want = 'twin';
+        else if (urgent >= 2 && p.weapons.includes('laser')) want = 'laser';
+        else want = 'pulse';
+      }
     }
     if (!p.weapons.includes(want)) want = 'pulse';
 
