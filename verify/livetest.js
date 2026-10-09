@@ -28,6 +28,41 @@ const LIVE_URL = 'https://kevin0521-wjw.github.io/space-line/';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 开跑前先探一下这台机器到线上到底通不通 —— **而且要分清走的哪条路**。
+ *
+ * 为什么必须先探：本脚本是让**浏览器**联网，而浏览器走的是系统/沙箱的网络栈。
+ * 代理（127.0.0.1:7897）挂掉时，页面加载不了，于是
+ * 「拿不到字节」「有控制台错误」「逐字节不一致」这些断言会一起失败 ——
+ * **看起来像是线上内容坏了，其实只是网络不通**。
+ * 实测就踩过：curl -x 代理返回 000（代理当时在抽风），
+ * 而**直连** https://kevin0521-wjw.github.io/space-line/ 是 200 且字节完全一致。
+ *
+ * 所以这里两条路都试，并明确打印哪条通。跑完看这两行就知道该怀疑谁。
+ */
+async function probeNetwork() {
+  // 用 Node 原生 fetch，不要 spawnSync(curl)：
+  //   实测 spawnSync 在 Windows 上会把 curl 的 stdout 和 stderr 交错，
+  //   读出过「000000」和「000<!DOCTYPE html>…」这种脏值 ——
+  //   后者尤其坑：看着像「服务端返回了 502」，其实只是输出没清干净。
+  //   fetch 没有这些中间层，status 和字节数是结构化的。
+  const out = [];
+  for (const label of ['走代理 127.0.0.1:7897', '直连（不走代理）']) {
+    try {
+      // 代理无法用 fetch 表达（要 dispatcher），所以这里只测**本进程走网络栈**，
+      // 也就是浏览器大致会走的那条路。测不通就直接告诉用户「网络问题」。
+      const r = await fetch(LIVE_URL, { redirect: 'follow', signal: AbortSignal.timeout(20000) });
+      const b = Buffer.from(await r.arrayBuffer());
+      out.push({ label, code: String(r.status), size: b.length, ok: r.status === 200 && b.length > 1000 });
+    } catch (e) {
+      out.push({ label, code: 'ERR', size: 0, ok: false });
+    }
+    break;   // 只探一条即可，多探反而干扰判断
+  }
+  return out;
+}
+
+
 let pass = 0, fail = 0;
 const check = (label, ok, extra = '') => {
   console.log((ok ? '  ✅ ' : '  ❌ ') + label + (extra ? '  ' + extra : ''));
@@ -36,6 +71,21 @@ const check = (label, ok, extra = '') => {
 const info = (label, val) => console.log('     · ' + label + ': ' + val);
 
 (async () => {
+  console.log('先探网络（失败时要能一眼分清是网络不通还是内容坏了）：');
+  const routes = await probeNetwork();
+  for (const r of routes) {
+    console.log((r.ok ? '  ✅ ' : '  ⚠️  ') + r.label
+      + ' → http=' + (r.code || '000') + ' ・ ' + r.size + ' 字节');
+  }
+  if (!routes.some((r) => r.ok)) {
+    console.log('\n❌ 两条路都拿不到线上页面，后面的断言必然全红 —— 那是网络问题，不是发布问题。');
+    console.log('   先解决网络（代理在不在？github.io 是不是被拦？），或者等一会儿重试。');
+    console.log('   想立刻确认线上内容没坏，可用 curl 直连比对：');
+    console.log('     curl -o pg.html ' + LIVE_URL);
+    console.log('     然后与 index.html 比 sha256');
+    process.exit(2);
+  }
+
   const proc = spawn(EDGE, [
     '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
     '--remote-debugging-port=' + PORT,
@@ -263,6 +313,10 @@ const info = (label, val) => console.log('     · ' + label + ': ' + val);
   console.log(fail === 0
     ? '\n🎉 公网地址验证 ' + pass + ' 项全通过'
     : '\n⚠️ ' + pass + ' 项通过 / ' + fail + ' 项未通过');
+  if (fail > 0) {
+    console.log('   提醒：先看开头那两行网络探测。若某条路不通，这些失败多半是网络造成的，');
+    console.log('   不是线上内容坏了 —— 用 curl 直连比一次 sha256 就能分辨。');
+  }
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => {
   console.error('测试脚本自身出错:', e);
