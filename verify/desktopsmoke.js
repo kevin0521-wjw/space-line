@@ -42,6 +42,12 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const EXE = path.join(ROOT, 'desktop', 'release_v130', 'win-unpacked', 'SpaceLine.exe');
 const PORT = 9351;
+// 首次冷启动的容忍上限。实测本机（无独立桌面会话）从 spawn 到「能真的求值」
+// 要 **超过 30 秒**：exe 有 188 MB，Electron 要解包、语言包要初始化。
+// ⚠️ 我一开始把它写成 8000ms，结果**把成功判成了失败** —— 报「启动后 2.5 秒内
+//    进程已退出」，可那进程其实活得好好的，手动连进去求值一切正常。
+// 超时的意义是「别无限等」，不是「超过就该判死」：宁可多等，不要误杀。
+const BOOT_TIMEOUT = 45000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -70,7 +76,9 @@ function countAlive() {
 /** 连上 CDP 并做一次真实求值，返回会话或 null。 */
 async function attach() {
   let targets = null;
-  for (let i = 0; i < 40; i++) {
+  // 轮询上限按 BOOT_TIMEOUT 算，不再写死次数 —— 否则改了一个超时却忘了另一个。
+  const deadline = Date.now() + BOOT_TIMEOUT;
+  while (Date.now() < deadline) {
     try {
       const r = await fetch('http://127.0.0.1:' + PORT + '/json/list');
       targets = await r.json();
@@ -85,7 +93,7 @@ async function attach() {
   const opened = await Promise.race([
     new Promise((r) => ws.addEventListener('open', () => r(true))),
     new Promise((r) => ws.addEventListener('error', (e) => r('连接失败: ' + (e.message || '未知')))),
-    sleep(8000).then(() => '超时'),
+    sleep(BOOT_TIMEOUT).then(() => '超时'),
   ]);
   if (opened !== true) return { err: 'CDP WebSocket ' + opened };
 
@@ -99,10 +107,10 @@ async function attach() {
       errors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text);
     }
   });
-  const send = (method, params = {}) => withTimeout(new Promise((res) => {
+  const send = (method, params = {}, timeout) => withTimeout(new Promise((res) => {
     const i = ++id; waiters.set(i, res);
     ws.send(JSON.stringify({ id: i, method, params }));
-  }), 8000, 'CDP ' + method);
+  }), timeout || BOOT_TIMEOUT, 'CDP ' + method);
   const evaluate = async (expr) => {
     const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true });
     if (r && r.exceptionDetails) return undefined;
@@ -131,11 +139,13 @@ async function launch(extraArgs) {
     try { child.kill(); } catch (e) {}
     return { ok: false, err: s.err };
   }
-  // 再稳一手：等 2.5s 复查，别又被 GPU 崩掉（坑 ③）
+  // 再稳一手：复查进程还在不在，别又被 GPU 崩掉（坑 ③）。
+  // ⚠️ 这条复查的**真正作用是抓「attach 之后才崩」**，不是限制启动时长 ——
+  //    冷启动要几十秒，所以必须放在 attach（已确认能求值）之后，而不是之前。
   await sleep(2500);
   if (countAlive() === 0) {
     try { child.kill(); } catch (e) {}
-    return { ok: false, err: '启动后 2.5 秒内进程已退出（GPU 或其它原因）' };
+    return { ok: false, err: '求值成功后进程仍退出（GPU 崩溃等）' };
   }
   return { ok: true, child, ...s };
 }
